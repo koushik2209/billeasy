@@ -1,0 +1,33 @@
+.env
+*.db
+__pycache__/
+*.pyc
+bills/
+invoice_registry.json
+gst_cache.json
+
+# Python
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# SQLite WAL/SHM (if present)
+*.db-journal
+*.db-wal
+*.db-shm
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+pyrightconfig.json
