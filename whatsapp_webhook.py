@@ -461,17 +461,18 @@ def send_pdf(to: str, pdf_path: str, caption: str = ""):
         return
 
     media_url = f"{BASE_URL}/bills/{filename}"
+    log.info(f"Sending PDF: {media_url} to {to}")
     try:
-        get_twilio_client().messages.create(
+        msg = get_twilio_client().messages.create(
             from_     = TWILIO_WHATSAPP_NUMBER,
             to        = to,
             body      = caption or f"📄 Invoice: {filename}",
             media_url = [media_url],
         )
         log_message(to, "OUT", f"[PDF] {media_url}")
-        log.info(f"PDF sent to {to}: {media_url}")
+        log.info(f"PDF sent to {to}: sid={msg.sid} status={msg.status}")
     except Exception as e:
-        log.error(f"PDF send failed to {to}: {e}")
+        log.error(f"PDF send failed to {to}: {e}", exc_info=True)
         send(to, f"📄 Your bill PDF is ready but could not be attached.\nFilename: {filename}")
 
 
@@ -791,10 +792,11 @@ def admin_registrations():
 # STARTUP
 # ════════════════════════════════════════════════
 
+# Always init tables (works with both gunicorn and python direct)
+init_database()
+init_registration_tables()
+
 if __name__ == "__main__":
-    # Init all tables
-    init_database()
-    init_registration_tables()
 
     print("\n" + "="*55)
     print("  BillEasy WhatsApp Webhook — Production")
