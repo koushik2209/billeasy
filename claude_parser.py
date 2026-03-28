@@ -213,6 +213,9 @@ def _regex_parse_message(message: str) -> dict:
         candidate = cm.group(1).strip()
         if len(candidate) >= 2:
             customer_name = candidate.title()
+            # Strip the "bill for Name" prefix so name doesn't leak into first item
+            message = message[:cm.start()] + message[cm.end():]
+            message = message.strip()
 
     items: list[dict] = []
     notes_parts: list[str] = []
@@ -222,6 +225,14 @@ def _regex_parse_message(message: str) -> dict:
     # Groups: (name, qty_or_None, price)  — order varies per pattern
 
     patterns = [
+        # "item price x<qty>"  — e.g. "pen 10 x 5", "pen 10 x5", "pen 10 × 5"
+        (
+            re.compile(
+                r"([A-Za-z][A-Za-z\s]{0,30}?)\s+(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)",
+                re.IGNORECASE,
+            ),
+            "name_price_xqty",
+        ),
         # "item x<qty> price"  or  "item <qty>x price"  — e.g. "rice x3 150", "pen 2x 24"
         (
             re.compile(
@@ -237,12 +248,12 @@ def _regex_parse_message(message: str) -> dict:
             ),
             "name_qtyx_price",
         ),
-        # "<qty> item price"  — e.g. "3 rice 150"
-        # Anchored to start-of-string or comma/newline to prevent greedily
-        # consuming a previous item's price as a quantity.
+        # "<qty> item price"  — e.g. "3 rice 150", "5 pen 10 3 notebook 40"
+        # Anchored to start-of-string, comma/newline, OR after a previous
+        # price (digit followed by whitespace) to support repeated patterns.
         (
             re.compile(
-                r"(?:^|[,\n])\s*(\d+(?:\.\d+)?)\s+([A-Za-z][A-Za-z\s]{0,30}?)\s+(\d+(?:\.\d+)?)",
+                r"(?:^|[,\n]|(?<=\d\s))\s*(\d+(?:\.\d+)?)\s+([A-Za-z][A-Za-z\s]{0,30}?)\s+(\d+(?:\.\d+)?)",
                 re.IGNORECASE,
             ),
             "qty_name_price",
@@ -299,7 +310,11 @@ def _regex_parse_message(message: str) -> dict:
                 continue
 
             try:
-                if ptype == "name_xqty_price":
+                if ptype == "name_price_xqty":
+                    name  = _clean_name(m.group(1))
+                    price = float(m.group(2))
+                    qty   = float(m.group(3))
+                elif ptype == "name_xqty_price":
                     name  = _clean_name(m.group(1))
                     qty   = float(m.group(2))
                     price = float(m.group(3))

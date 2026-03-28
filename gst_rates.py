@@ -100,10 +100,15 @@ GST_RATES = {
     "glucometer": {"hsn": "9027", "gst": 12},
 
     # ── CLOTHING & TEXTILES ──
+    # NOTE: Clothing and footwear have price-based GST slabs.
+    # Rates here are defaults; adjust_gst_for_price() overrides based on unit price:
+    #   Clothing: ≤₹1000 → 5%, >₹1000 → 12%
+    #   Footwear: ≤₹1000 → 5%, >₹1000 → 18%
     "shirt": {"hsn": "6205", "gst": 12},
     "tshirt": {"hsn": "6109", "gst": 12},
     "t-shirt": {"hsn": "6109", "gst": 12},
     "trouser": {"hsn": "6203", "gst": 12},
+    "pant": {"hsn": "6203", "gst": 12},
     "pants": {"hsn": "6203", "gst": 12},
     "jeans": {"hsn": "6203", "gst": 12},
     "saree": {"hsn": "5208", "gst": 5},
@@ -125,13 +130,25 @@ GST_RATES = {
     "towel": {"hsn": "6302", "gst": 12},
     "curtain": {"hsn": "6303", "gst": 12},
 
+    "tracksuit": {"hsn": "6112", "gst": 12},
+    "lehenga": {"hsn": "6204", "gst": 12},
+    "anarkali": {"hsn": "6204", "gst": 12},
+    "ghagra": {"hsn": "6204", "gst": 12},
+    "sharara": {"hsn": "6204", "gst": 12},
+    "frock": {"hsn": "6204", "gst": 12},
+    "petticoat": {"hsn": "6208", "gst": 12},
+    "nightgown": {"hsn": "6208", "gst": 12},
+    "jean": {"hsn": "6203", "gst": 12},
+
     # ── FOOTWEAR ──
     "chappal": {"hsn": "6402", "gst": 5},
+    "chappals": {"hsn": "6402", "gst": 5},
     "sandal": {"hsn": "6402", "gst": 5},
     "shoes": {"hsn": "6403", "gst": 18},
     "sneakers": {"hsn": "6403", "gst": 18},
     "boots": {"hsn": "6403", "gst": 18},
     "slippers": {"hsn": "6402", "gst": 5},
+    "kolhapuri": {"hsn": "6402", "gst": 5},
 
     # ── FOOD & GROCERY ──
     "rice": {"hsn": "1006", "gst": 0},
@@ -221,6 +238,8 @@ GST_RATES = {
     "hair oil": {"hsn": "3305", "gst": 18},
     "hair colour": {"hsn": "3305", "gst": 18},
     "nail polish": {"hsn": "3304", "gst": 18},
+    "makeup": {"hsn": "3304", "gst": 28},
+    "cosmetics": {"hsn": "3304", "gst": 28},
     "diaper": {"hsn": "9619", "gst": 18},
     "cotton": {"hsn": "5201", "gst": 0},
 
@@ -272,6 +291,18 @@ GST_RATES = {
     "pesticide": {"hsn": "3808", "gst": 18},
     "tractor": {"hsn": "8701", "gst": 12},
     "pump": {"hsn": "8413", "gst": 12},
+
+    # ── JEWELLERY ──
+    "gold": {"hsn": "7108", "gst": 3},
+    "gold chain": {"hsn": "7113", "gst": 3},
+    "gold ring": {"hsn": "7113", "gst": 3},
+    "silver": {"hsn": "7106", "gst": 3},
+    "diamond": {"hsn": "7102", "gst": 3},
+    "jewellery": {"hsn": "7113", "gst": 3},
+    "jewelry": {"hsn": "7113", "gst": 3},
+    "necklace": {"hsn": "7113", "gst": 3},
+    "bangle": {"hsn": "7113", "gst": 3},
+    "earring": {"hsn": "7113", "gst": 3},
 
     # ── DEFAULT ──
     "default": {"hsn": "9999", "gst": 18}
@@ -404,23 +435,24 @@ def get_gst_rate_smart(item_name, client=None):
     """
     item_lower = item_name.lower().strip()
 
-    # Step 1 — hardcoded list
+    # Step 1 — hardcoded list (exact match)
     if item_lower in GST_RATES:
-        return GST_RATES[item_lower]
+        return {**GST_RATES[item_lower], "source": "exact", "confidence": "high"}
 
+    # Step 1b — hardcoded list (word-boundary substring)
     for key in GST_RATES:
         if key != "default" and _word_boundary_match(key, item_lower):
-            return GST_RATES[key]
+            return {**GST_RATES[key], "source": "exact", "confidence": "high"}
 
     # Step 2 — fuzzy match on hardcoded list
     fuzzy_result = fuzzy_match(item_lower)
     if fuzzy_result:
-        return fuzzy_result
+        return {**fuzzy_result, "source": "fuzzy", "confidence": "medium"}
 
     # Step 3 — cache (Claude-found items from previous lookups)
     cache = load_cache()
     if item_lower in cache:
-        return cache[item_lower]
+        return {**cache[item_lower], "source": "cache", "confidence": "medium"}
 
     # Step 4 — Claude API
     if client:
@@ -465,10 +497,10 @@ def get_gst_rate_smart(item_name, client=None):
                 if result["gst"] not in valid_slabs:
                     result["gst"] = 18  # safe default
 
-                # Save to cache
-                cache[item_lower] = result
+                # Save to cache (without source — source is transient)
+                cache[item_lower] = {"hsn": result["hsn"], "gst": result["gst"]}
                 save_cache(cache)
-                return result
+                return {**result, "source": "claude", "confidence": "medium"}
 
         except Exception as e:
             _log.warning(f"Claude lookup failed for '{item_name}': {e}")
@@ -478,12 +510,95 @@ def get_gst_rate_smart(item_name, client=None):
         f"Unknown item '{item_name}' — "
         f"using default 18%. Add manually to GST_RATES if needed."
     )
-    return GST_RATES["default"]
+    return {**GST_RATES["default"], "source": "default", "confidence": "low"}
 
 
 def get_all_categories():
     """Returns all product categories in hardcoded list."""
     return [k for k in GST_RATES.keys() if k != "default"]
+
+
+# ════════════════════════════════════════════════
+# PRICE-BASED GST SLABS (Clothing & Footwear)
+# ════════════════════════════════════════════════
+
+# Indian GST rules: clothing and footwear rates depend on unit price.
+#   Clothing: ≤₹1000 → 5%, >₹1000 → 12%
+#   Footwear: ≤₹1000 → 5%, >₹1000 → 18%
+
+CLOTHING_KEYWORDS = {
+    "shirt", "tshirt", "t-shirt", "trouser", "pant", "pants", "jean", "jeans",
+    "saree", "salwar", "kurta", "dress", "jacket", "sweater", "socks",
+    "underwear", "bra", "legging", "dupatta", "fabric", "cloth",
+    "bedsheet", "blanket", "towel", "curtain",
+    "hoodie", "top", "skirt", "shorts", "blazer", "shawl", "stole",
+    "lungi", "dhoti", "palazzo", "capri", "trackpant", "jogger",
+    "tracksuit", "lehenga", "anarkali", "ghagra", "sharara",
+    "frock", "romper", "onesie", "petticoat", "nightgown",
+}
+
+FOOTWEAR_KEYWORDS = {
+    "chappal", "chappals", "sandal", "sandals", "shoe", "shoes", "sneakers",
+    "boots", "slippers", "slipper", "footwear", "floater", "loafer",
+    "heel", "heels", "mojari", "jutti", "kolhapuri",
+}
+
+_CLOTHING_SLAB_THRESHOLD = 1000  # Rs.
+
+
+def is_clothing_item(item_name: str) -> bool:
+    """Check if item is clothing (eligible for price-based slab)."""
+    name = item_name.lower().strip()
+    if name in CLOTHING_KEYWORDS:
+        return True
+    for kw in CLOTHING_KEYWORDS:
+        if _word_boundary_match(kw, name):
+            return True
+    return False
+
+
+def is_footwear_item(item_name: str) -> bool:
+    """Check if item is footwear (eligible for price-based slab)."""
+    name = item_name.lower().strip()
+    if name in FOOTWEAR_KEYWORDS:
+        return True
+    for kw in FOOTWEAR_KEYWORDS:
+        if _word_boundary_match(kw, name):
+            return True
+    return False
+
+
+def adjust_gst_for_price(item_name: str, unit_price: float, rate_info: dict) -> dict:
+    """
+    Apply price-based GST slab for clothing and footwear.
+    Returns a NEW dict (never mutates input).
+
+    Rules:
+        Clothing: ≤₹1000 → 5%, >₹1000 → 12%
+        Footwear: ≤₹1000 → 5%, >₹1000 → 18%
+
+    Non-clothing/footwear items are returned unchanged.
+    Items with source='manual' are never overridden (user explicitly set the rate).
+    """
+    source = rate_info.get("source", "")
+    if source == "manual":
+        return rate_info
+
+    price = abs(unit_price)
+
+    if is_clothing_item(item_name):
+        correct_rate = 5 if price <= _CLOTHING_SLAB_THRESHOLD else 12
+        if rate_info.get("gst") != correct_rate:
+            return {**rate_info, "gst": correct_rate}
+        return rate_info
+
+    if is_footwear_item(item_name):
+        correct_rate = 5 if price <= _CLOTHING_SLAB_THRESHOLD else 18
+        if rate_info.get("gst") != correct_rate:
+            return {**rate_info, "gst": correct_rate}
+        return rate_info
+
+    return rate_info
 
 
 if __name__ == "__main__":

@@ -73,6 +73,7 @@ class Bill(Base):
     total_gst       = Column(Float, nullable=False)
     grand_total     = Column(Float, nullable=False)
     is_igst         = Column(Boolean, default=False)
+    is_return       = Column(Boolean, default=False)
     pdf_path        = Column(Text, nullable=False)
     raw_message     = Column(Text, default="")
     confidence      = Column(Float, default=1.0)

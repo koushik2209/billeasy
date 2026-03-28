@@ -23,10 +23,12 @@ Two entry points:
 | File | Purpose |
 |---|---|
 | `main.py` | Entry point: CLI billing loop, CRUD ops (save/query bills), session management, environment validation. Seeds demo shop "RAVI". |
-| `database.py` | SQLAlchemy models + session helper. Models: `Shop`, `Bill`, `SessionRecord`, `InvoiceSequence`, `Registration`, `ConversationLog`. Thread-safe invoice sequence. |
-| `bill_generator.py` | Dataclasses (`BillItem`, `ShopProfile`, `CustomerInfo`, `BillResult`), GST calculation, PDF generation via ReportLab. Handles TAX INVOICE vs BILL OF SUPPLY. |
+| `database.py` | SQLAlchemy models + session helper. Models: `Shop`, `Bill` (with `is_return` flag), `SessionRecord`, `InvoiceSequence`, `Registration`, `ConversationLog`. Thread-safe invoice sequence. |
+| `bill_generator.py` | Dataclasses (`BillItem`, `ShopProfile`, `CustomerInfo`, `BillResult`), GST calculation, PDF generation via ReportLab. Handles TAX INVOICE, BILL OF SUPPLY, and CREDIT NOTE. |
+| `return_detector.py` | Rule-based + fuzzy return/credit note intent detection. Keyword regex, rapidfuzz partial matching, negative price detection. `negate_items()` for credit note processing. No external API calls. |
 | `claude_parser.py` | Sends shopkeeper messages to Claude API for item extraction. Includes rate limiting, retry logic (429/529), input sanitization, prompt injection detection, and a regex fallback parser. |
 | `gst_rates.py` | 200+ hardcoded HSN/GST rate mappings. 5-step lookup: exact → substring → fuzzy (rapidfuzz) → JSON cache → Claude API fallback. |
+| `reports.py` | GST report generation: `get_gst_report()` (DB aggregation), `parse_report_range()` (NL date parsing), `msg_gst_report()` (WhatsApp format), `export_gst_report_pdf()` (ReportLab PDF). Indian number formatting. |
 | `config.py` | Loads `.env`, validates required keys, lazy Anthropic client singleton. Also holds Twilio config. |
 | `whatsapp_webhook.py` | Flask app with Twilio webhook. Full self-registration state machine (NEW → ASKED_NAME → ASKED_ADDRESS → ASKED_GSTIN → ACTIVE → EXPIRED). Bill preview/confirmation flow before PDF generation. Indian states dict for IGST state selection. REST API endpoints with API key auth. |
 
@@ -93,7 +95,10 @@ Two entry points:
 - **IGST support**: If customer state_code differs from shop state_code → inter-state → IGST. If same or missing → intra-state → CGST+SGST. PDF layout, totals, and WhatsApp summaries adapt automatically.
 - **Trial system**: 10-day free trial, then Rs.299/month (manual upgrade via support contact)
 - **Prices are pre-GST**: Claude prompt explicitly states prices given are before GST
-- **Bill confirmation flow**: After parsing, a preview is shown (items, customer, tax type). User must reply YES to generate. Can modify customer name (`NAME Ravi`), state (`STATE`), re-enter items (`EDIT`), or cancel. Pending bills expire after 10 minutes. Stored in-memory per worker (keyed by phone).
+- **Bill confirmation flow**: After parsing, a preview is shown (items with GST rate per item, customer, tax type, full GST breakdown). User must reply YES to generate. Can modify customer name (`NAME Ravi`), state (`STATE`), override GST rate (`GST 1 12`), re-enter items (`EDIT`), or cancel. Pending bills expire after 10 minutes. Stored in-memory per worker (keyed by phone). GST rates resolved at preview time and stored in pending items — ensures preview totals match final bill exactly.
+- **GST rate source tracking**: `get_gst_rate_smart()` returns a `source` field: `exact`, `fuzzy`, `cache`, `claude`, `default`. Items with `fuzzy` or `default` source show a warning marker in preview. Users can override with `GST <item#> <rate>`.
+- **Orphan command handling**: If user sends confirmation commands (YES, CANCEL, EDIT, NAME, STATE, GST override) with no pending bill, a helpful "no pending bill" message is shown instead of parsing as items.
+- **GST Reports**: `gst report` command generates monthly/date-range GST summaries. Supports "gst report", "gst report last 7 days", "gst report last month", "gst report march". Returns WhatsApp text summary + PDF attachment. Indian number formatting (lakh/crore). Report PDFs saved in `reports/` folder.
 - **Regex fallback**: If Claude API fails, a rule-based regex parser handles item extraction (confidence capped at 0.6). Patterns are anchored to prevent greedy cross-item matching.
 - **Rate limiting**: 100 calls/60s sliding window on Claude API calls
 - **State defaults**: Telangana / state code 36 (Hyderabad-centric). Customer state defaults to shop state (intra-state) if not provided.

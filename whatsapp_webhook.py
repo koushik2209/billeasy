@@ -32,10 +32,11 @@ from config import (
     get_anthropic_client,
 )
 from claude_parser import parse_message
+from gst_rates import get_gst_rate_smart, adjust_gst_for_price
 from bill_generator import (
     ShopProfile, CustomerInfo, BillItem,
-    generate_invoice_number, generate_pdf_bill,
-    PLACEHOLDER_GSTIN, GSTIN_REGEX,
+    generate_invoice_number, generate_pdf_bill, calculate_bill,
+    PLACEHOLDER_GSTIN, GSTIN_REGEX, VALID_GST_SLABS,
 )
 from main import (
     init_database, seed_demo_shop,
@@ -47,6 +48,11 @@ from database import (
     init_database as init_db,
     generate_api_key, validate_api_key,
 )
+from reports import (
+    get_gst_report, parse_report_range, msg_gst_report,
+    export_gst_report_pdf,
+)
+from return_detector import detect_return_intent, negate_items
 
 # ── Logging ──
 logging.basicConfig(
@@ -256,6 +262,7 @@ def msg_activated(shop_name: str, days: int, api_key: str = "") -> str:
         f"*Commands:*\n"
         f"• *today* — Today's sales summary\n"
         f"• *history* — Last 5 bills\n"
+        f"• *gst report* — Monthly GST summary\n"
         f"• *help* — Show this message\n"
         f"{key_line}\n"
         f"Try generating your first bill now! 👆"
@@ -277,6 +284,8 @@ def msg_help(shop_name: str, days: int) -> str:
         f"*Commands:*\n"
         f"• *today* — Today's summary\n"
         f"• *history* — Last 5 bills\n"
+        f"• *gst report* — This month's GST summary\n"
+        f"• *gst report last 7 days* — Custom range\n"
         f"• *help* — This message\n\n"
         f"━━━━━━━━━━━━━━━━━\n"
         f"*Support:*\n"
@@ -333,28 +342,33 @@ def msg_history(shop_id: str) -> str:
         return "Could not fetch history. Please try again."
 
 
-def msg_bill_summary(bill_result, invoice_number: str, customer_name: str, days: int) -> str:
+def msg_bill_summary(bill_result, invoice_number: str, customer_name: str, days: int, is_return: bool = False) -> str:
+    sign = "-" if is_return else ""
+    doc_label = "Credit Note" if is_return else "Invoice"
+    total_label = "REFUND" if is_return else "TOTAL"
+    header = "🔁 *Credit Note Generated!*" if is_return else "✅ *Bill Generated!*"
+
     lines = [
-        f"✅ *Bill Generated!*\n",
-        f"📋 Invoice: *{invoice_number}*",
+        f"{header}\n",
+        f"📋 {doc_label}: *{invoice_number}*",
         f"👤 Customer: *{customer_name}*\n",
         f"*Items:*",
     ]
     for item in bill_result.items:
         qty = int(item.qty) if item.qty == int(item.qty) else item.qty
-        lines.append(f"• {item.name} x{qty} — Rs.{item.total:.2f} ({item.gst_rate}% GST)")
+        lines.append(f"• {item.name} x{qty} — {sign}Rs.{abs(item.total):.2f} ({item.gst_rate}% GST)")
 
     lines.append(f"\n━━━━━━━━━━━━━━━━━")
-    lines.append(f"Subtotal:  Rs.{bill_result.subtotal:.2f}")
+    lines.append(f"Subtotal:  {sign}Rs.{abs(bill_result.subtotal):.2f}")
     if bill_result.is_igst:
-        lines.append(f"IGST:      Rs.{bill_result.total_igst:.2f}")
+        lines.append(f"IGST:      {sign}Rs.{abs(bill_result.total_igst):.2f}")
     else:
-        lines.append(f"CGST:      Rs.{bill_result.total_cgst:.2f}")
-        lines.append(f"SGST:      Rs.{bill_result.total_sgst:.2f}")
+        lines.append(f"CGST:      {sign}Rs.{abs(bill_result.total_cgst):.2f}")
+        lines.append(f"SGST:      {sign}Rs.{abs(bill_result.total_sgst):.2f}")
     lines += [
-        f"Total GST: Rs.{bill_result.total_gst:.2f}",
+        f"Total GST: {sign}Rs.{abs(bill_result.total_gst):.2f}",
         f"━━━━━━━━━━━━━━━━━",
-        f"*TOTAL: Rs.{bill_result.grand_total:.2f}*\n",
+        f"*{total_label}: {sign}Rs.{abs(bill_result.grand_total):.2f}*\n",
         f"_{bill_result.in_words}_\n",
         f"📄 PDF attached below. Forward to customer.",
         f"Trial days left: {days}",
@@ -414,20 +428,21 @@ def send(to: str, body: str):
         log.error(f"Send failed to {to}: {e}")
 
 
-def send_pdf(to: str, pdf_path: str, caption: str = ""):
-    """Send a PDF bill as a WhatsApp media message via Twilio.
+def send_pdf(to: str, pdf_path: str, caption: str = "", url_prefix: str = "bills"):
+    """Send a PDF as a WhatsApp media message via Twilio.
 
-    Requires BASE_URL (NGROK_URL) to be set so Twilio can fetch the file.
+    Requires BASE_URL to be set so Twilio can fetch the file.
+    url_prefix: "bills" for invoices, "reports" for GST reports.
     Falls back to a text-only notice if BASE_URL is not configured.
     """
     filename = os.path.basename(pdf_path)
 
     if not BASE_URL:
         log.warning("BASE_URL not set — cannot send PDF media. Sending text fallback.")
-        send(to, f"📄 Your bill PDF is ready: {filename}\n(Ask shop to share the file)")
+        send(to, f"📄 Your PDF is ready: {filename}\n(Ask shop to share the file)")
         return
 
-    media_url = f"{BASE_URL}/bills/{filename}"
+    media_url = f"{BASE_URL}/{url_prefix}/{filename}"
     log.info(f"Sending PDF: {media_url} to {to}")
     try:
         msg = get_twilio_client().messages.create(
@@ -542,6 +557,8 @@ class PendingBill:
     raw_message: str
     created_at: datetime
     awaiting_state: bool = False
+    state_assumed: bool = True
+    is_return: bool = False
 
 
 _pending_bills: dict[str, PendingBill] = {}
@@ -586,37 +603,116 @@ def cleanup_expired_pending():
 # PREVIEW + CONFIRMATION MESSAGES
 # ════════════════════════════════════════════════
 
+def _compute_preview_totals(pending: PendingBill) -> dict:
+    """Run calculate_bill on pending items to get GST breakdown for preview."""
+    try:
+        items = [
+            BillItem(
+                name=i["name"], qty=i["qty"], price=abs(i["price"]),
+                hsn=i.get("hsn", ""), gst_rate=i.get("gst_rate", 18),
+            )
+            for i in pending.items
+        ]
+        br = calculate_bill(
+            items,
+            gst_client=None,
+            shop_state_code=pending.shop_state_code,
+            customer_state_code=pending.customer_state_code,
+        )
+        # For credit notes, negate all amounts
+        sign = -1 if pending.is_return else 1
+        return {
+            "subtotal":   br.subtotal * sign,
+            "total_cgst": br.total_cgst * sign,
+            "total_sgst": br.total_sgst * sign,
+            "total_igst": br.total_igst * sign,
+            "total_gst":  br.total_gst * sign,
+            "grand_total": br.grand_total * sign,
+            "is_igst":    br.is_igst,
+        }
+    except Exception as e:
+        log.warning(f"Preview totals failed: {e}")
+        return None
+
+
 def msg_preview(pending: PendingBill) -> str:
     """Format bill preview message shown before confirmation."""
-    lines = [
-        "📋 *Bill Preview*\n",
-        f"👤 Customer: *{pending.customer_name}*",
-    ]
+    if pending.is_return:
+        lines = [
+            "🔁 *Credit Note (Return)*\n",
+            f"👤 Customer: *{pending.customer_name}*",
+        ]
+    else:
+        lines = [
+            "📋 *Bill Preview*\n",
+            f"👤 Customer: *{pending.customer_name}*",
+        ]
 
-    if pending.customer_state_code == pending.shop_state_code:
-        lines.append(f"📍 State: {pending.customer_state} (same as shop)")
+    # ── State + tax type (always show assumed tag) ──
+    is_intra = pending.customer_state_code == pending.shop_state_code
+    assumed_tag = " _(assumed)_" if pending.state_assumed else ""
+
+    if is_intra:
+        lines.append(f"📍 State: {pending.customer_state}{assumed_tag}")
         lines.append(f"💰 Tax: CGST + SGST (intra-state)")
     else:
-        lines.append(f"📍 State: {pending.customer_state} (Code: {pending.customer_state_code})")
+        lines.append(f"📍 State: {pending.customer_state} (Code: {pending.customer_state_code}){assumed_tag}")
         lines.append(f"💰 Tax: IGST (inter-state)")
 
-    lines.append(f"\n*Items:*")
+    if pending.state_assumed:
+        lines.append(f"_If different, reply:_ *STATE*")
+
+    # ── Items (with GST rate per item) ──
+    lines.append(f"\n*{'Return Items' if pending.is_return else 'Items'}:*")
+    has_low_confidence = False
     for i, item in enumerate(pending.items, 1):
         qty = int(item["qty"]) if item["qty"] == int(item["qty"]) else item["qty"]
-        lines.append(f"  {i}. {item['name']} x{qty} — Rs.{item['price']:.2f}")
+        rate = item.get("gst_rate", 18)
+        confidence = item.get("gst_confidence", item.get("gst_source", ""))
+        display_price = abs(item["price"])
+        sign = "-" if pending.is_return else ""
+        if confidence == "low" or confidence == "default":
+            lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f} ({rate}% GST ⚠️)")
+            has_low_confidence = True
+        elif confidence == "medium" or confidence == "fuzzy":
+            lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f} ({rate}% GST ~)")
+        else:
+            lines.append(f"  {i}. {item['name']} x{qty} — {sign}Rs.{display_price:.2f} ({rate}% GST)")
 
+    # ── Single grouped warning for low-confidence items ──
+    if has_low_confidence:
+        lines.append(f"\n⚠️ GST assumed for some items (default 18%). Verify if needed.")
+        lines.append(f"_Fix: *GST 1 12* or *shirt gst 12*_")
+
+    # ── GST breakdown ──
+    totals = _compute_preview_totals(pending)
+    if totals:
+        sign = "-" if pending.is_return else ""
+        lines.append(f"\n━━━━━━━━━━━━━━━━━")
+        lines.append(f"Subtotal: {sign}Rs.{abs(totals['subtotal']):.2f}")
+        if totals["is_igst"]:
+            lines.append(f"IGST:     {sign}Rs.{abs(totals['total_igst']):.2f}")
+        else:
+            lines.append(f"CGST:     {sign}Rs.{abs(totals['total_cgst']):.2f}")
+            lines.append(f"SGST:     {sign}Rs.{abs(totals['total_sgst']):.2f}")
+        lines.append(f"Total GST: {sign}Rs.{abs(totals['total_gst']):.2f}")
+        lines.append(f"━━━━━━━━━━━━━━━━━")
+        lines.append(f"*{'REFUND' if pending.is_return else 'TOTAL'}: {sign}Rs.{abs(totals['grand_total']):.2f}*")
+
+    # ── Confidence warning ──
     if pending.confidence < 0.8:
-        lines.append(f"\n⚠️ _Low confidence ({pending.confidence:.0%}) — please verify_")
+        lines.append(f"\n⚠️ _Some items may be incorrect. Please verify._")
 
-    lines += [
-        f"\n━━━━━━━━━━━━━━━━━",
-        f"Reply:",
-        f"• *YES* → Generate bill",
-        f"• *NAME Ravi* → Change customer name",
-        f"• *STATE* → Change customer state",
-        f"• *EDIT* → Re-enter items",
-        f"• *CANCEL* → Discard",
-    ]
+    # ── Commands ──
+    lines.append(f"\n━━━━━━━━━━━━━━━━━")
+    lines.append(f"Reply:")
+    lines.append(f"• *YES* → Confirm")
+    lines.append(f"• *EDIT* → Re-enter items")
+    lines.append(f"• *GST 1 12* or *shirt gst 12* → Fix rate")
+    lines.append(f"• *CANCEL* → Discard")
+    if not pending.is_return:
+        lines.append(f"• *NAME Ravi* → Change name")
+        lines.append(f"• *STATE* → Change state")
     return "\n".join(lines)
 
 
@@ -635,6 +731,56 @@ def msg_state_prompt() -> str:
         "• *UP* or *09*\n\n"
         "Type *BACK* to keep current state."
     )
+
+
+# ════════════════════════════════════════════════
+# ORPHAN COMMAND DETECTION
+# ════════════════════════════════════════════════
+
+_CONFIRM_COMMANDS = frozenset({
+    "yes", "y", "confirm", "ok", "done",
+    "cancel", "no", "discard",
+    "edit", "change", "redo",
+    "change state", "state", "igst",
+})
+
+def _is_confirmation_command(msg_lower: str) -> bool:
+    """Check if message looks like a confirmation-flow command with no pending bill."""
+    if msg_lower in _CONFIRM_COMMANDS:
+        return True
+    if msg_lower.startswith("name "):
+        return True
+    # "gst 1 12" (index-based) — NOT "gst report" (already handled earlier)
+    if re.match(r"gst\s+\d+\s+\d+%?$", msg_lower):
+        return True
+    # "shirt gst 12" (name-based)
+    if re.match(r".+\s+gst\s+\d+%?$", msg_lower):
+        return True
+    return False
+
+
+# ════════════════════════════════════════════════
+# GST REPORT HANDLER
+# ════════════════════════════════════════════════
+
+def _handle_gst_report(from_number: str, msg_lower: str, shop_id: str, shop_name: str):
+    """Handle 'gst report' command with optional date range."""
+    try:
+        # Strip the command prefix to get the range text
+        range_text = msg_lower.replace("gst report", "", 1).strip()
+        start_date, end_date, label = parse_report_range(range_text)
+
+        report = get_gst_report(shop_id, start_date, end_date)
+        send(from_number, msg_gst_report(report, label))
+
+        # Generate and send PDF if there are invoices
+        if report.total_invoices > 0:
+            pdf_path = export_gst_report_pdf(report, label, shop_name)
+            send_pdf(from_number, pdf_path, f"📊 GST Report — {label}", url_prefix="reports")
+
+    except Exception as e:
+        log.error(f"GST report error for {from_number}: {e}", exc_info=True)
+        send(from_number, "Could not generate GST report. Please try again.")
 
 
 # ════════════════════════════════════════════════
@@ -669,6 +815,32 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
             shop_state      = "Telangana"
             shop_state_code = "36"
 
+        # Resolve GST rates now so preview and final bill use identical rates
+        for item in parsed["items"]:
+            try:
+                rate_info = get_gst_rate_smart(item["name"], get_anthropic_client())
+            except Exception as e:
+                log.warning(f"GST lookup failed for '{item['name']}': {e}")
+                rate_info = {"hsn": "9999", "gst": 18, "source": "default", "confidence": "low"}
+            # Apply price-based slab (clothing/footwear)
+            rate_info = adjust_gst_for_price(item["name"], item["price"], rate_info)
+            item["hsn"]           = rate_info.get("hsn", "9999")
+            item["gst_rate"]      = rate_info.get("gst", 18)
+            item["gst_source"]    = rate_info.get("source", "default")
+            item["gst_confidence"] = rate_info.get("confidence", "low")
+
+        # Detect return/credit note intent
+        is_return = detect_return_intent(message, parsed["items"])
+        bill_items = parsed["items"]
+        if is_return:
+            bill_items = negate_items(bill_items)
+            # Re-attach resolved GST rates to negated items
+            for neg, orig in zip(bill_items, parsed["items"]):
+                neg["hsn"]           = orig.get("hsn", "9999")
+                neg["gst_rate"]      = orig.get("gst_rate", 18)
+                neg["gst_source"]    = orig.get("gst_source", "default")
+                neg["gst_confidence"] = orig.get("gst_confidence", "low")
+
         pending = PendingBill(
             phone              = from_number,
             shop_id            = shop_id,
@@ -678,11 +850,12 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
             customer_name      = parsed["customer_name"],
             customer_state     = shop_state,       # default: same as shop
             customer_state_code= shop_state_code,  # default: intra-state
-            items              = parsed["items"],
+            items              = bill_items,
             confidence         = parsed.get("confidence", 1.0),
             warnings           = parsed.get("warnings", []),
             raw_message        = message,
             created_at         = datetime.now(),
+            is_return          = is_return,
         )
 
         store_pending(from_number, pending)
@@ -694,6 +867,36 @@ def _handle_new_bill(from_number: str, message: str, reg: dict,
             f"❌ Something went wrong. Please try again.\n\n"
             f"Support: +91 7981053846"
         )
+
+
+def _match_item_by_name(search: str, items: list) -> int | None:
+    """Match a search string to a pending bill item by name.
+
+    Returns the 0-based index of the best match, or None.
+    Tries: exact match → substring → token overlap.
+    """
+    search_lower = search.lower().strip()
+    if not search_lower:
+        return None
+
+    # Exact match (case-insensitive)
+    for i, item in enumerate(items):
+        if item["name"].lower() == search_lower:
+            return i
+
+    # Substring match
+    for i, item in enumerate(items):
+        if search_lower in item["name"].lower() or item["name"].lower() in search_lower:
+            return i
+
+    # Token overlap: any word in search matches any word in item name
+    search_tokens = set(search_lower.split())
+    for i, item in enumerate(items):
+        item_tokens = set(item["name"].lower().split())
+        if search_tokens & item_tokens:
+            return i
+
+    return None
 
 
 def _handle_confirmation(from_number: str, msg_lower: str, message: str,
@@ -732,20 +935,106 @@ def _handle_confirmation(from_number: str, msg_lower: str, message: str,
         send(from_number, msg_state_prompt())
         return
 
+    # GST rate override: "GST 1 12" or "GST 1 12%" (index-based)
+    gst_idx_match = re.match(r"gst\s+(\d+)\s+(\d+)%?$", msg_lower)
+    if gst_idx_match:
+        item_idx = int(gst_idx_match.group(1))
+        new_rate = int(gst_idx_match.group(2))
+        if new_rate not in VALID_GST_SLABS:
+            send(from_number, f"❌ Invalid GST rate.\nValid: *0%, 5%, 12%, 18%, 28%*")
+            return
+        if item_idx < 1 or item_idx > len(pending.items):
+            send(from_number, f"❌ Invalid item number. You have {len(pending.items)} item(s).")
+            return
+        pending.items[item_idx - 1]["gst_rate"] = new_rate
+        pending.items[item_idx - 1]["gst_source"] = "manual"
+        pending.created_at = datetime.now()
+        store_pending(from_number, pending)
+        send(from_number, f"✅ Item {item_idx} GST rate → {new_rate}%\n")
+        send(from_number, msg_preview(pending))
+        return
+
+    # GST rate override: "shirt gst 12" or "phone case gst 5%" (name-based)
+    gst_name_match = re.match(r"(.+?)\s+gst\s+(\d+)%?$", msg_lower)
+    if gst_name_match:
+        search_name = gst_name_match.group(1).strip()
+        new_rate = int(gst_name_match.group(2))
+        if new_rate not in VALID_GST_SLABS:
+            send(from_number, f"❌ Invalid GST rate.\nValid: *0%, 5%, 12%, 18%, 28%*")
+            return
+        matched_idx = _match_item_by_name(search_name, pending.items)
+        if matched_idx is None:
+            send(from_number,
+                f"❌ No item matching \"{search_name}\".\n"
+                f"_Try: *GST <item#> <rate>* (e.g., GST 1 12)_"
+            )
+            return
+        pending.items[matched_idx]["gst_rate"] = new_rate
+        pending.items[matched_idx]["gst_source"] = "manual"
+        pending.created_at = datetime.now()
+        store_pending(from_number, pending)
+        send(from_number, f"✅ \"{pending.items[matched_idx]['name']}\" GST rate → {new_rate}%\n")
+        send(from_number, msg_preview(pending))
+        return
+
     # EDIT
     if msg_lower in ("edit", "change", "redo"):
         clear_pending(from_number)
         send(from_number,
-            "✏️ Send your bill message again.\n\n"
-            "_Example: phone case 299 charger 499 customer Suresh_"
+            "✏️ *Bill discarded. Send updated items:*\n\n"
+            "_Example:_\n"
+            "_shirt 500 pant 700 customer Suresh_\n\n"
+            "Your message will be re-parsed and a new preview shown."
         )
         return
 
-    # Unknown command → re-show preview with hint
-    send(from_number,
-        f"❓ Didn't understand *{message[:30].strip()}*\n\n"
-        + msg_preview(pending)
-    )
+    # ── Natural correction: if message looks like items, re-parse and replace ──
+    try:
+        parsed = parse_message(message)
+        if parsed.get("items") and not parsed.get("error"):
+            # Looks like new items — treat as automatic EDIT
+            shop = get_shop(pending.shop_id)
+            shop_state      = shop.state if shop else pending.shop_state
+            shop_state_code = shop.state_code if shop else pending.shop_state_code
+
+            for item in parsed["items"]:
+                try:
+                    rate_info = get_gst_rate_smart(item["name"], get_anthropic_client())
+                except Exception:
+                    rate_info = {"hsn": "9999", "gst": 18, "source": "default", "confidence": "low"}
+                rate_info = adjust_gst_for_price(item["name"], item["price"], rate_info)
+                item["hsn"]           = rate_info.get("hsn", "9999")
+                item["gst_rate"]      = rate_info.get("gst", 18)
+                item["gst_source"]    = rate_info.get("source", "default")
+                item["gst_confidence"] = rate_info.get("confidence", "low")
+
+            is_return = detect_return_intent(message, parsed["items"])
+            bill_items = parsed["items"]
+            if is_return:
+                bill_items = negate_items(bill_items)
+                for neg, orig in zip(bill_items, parsed["items"]):
+                    neg["hsn"]           = orig.get("hsn", "9999")
+                    neg["gst_rate"]      = orig.get("gst_rate", 18)
+                    neg["gst_source"]    = orig.get("gst_source", "default")
+                    neg["gst_confidence"] = orig.get("gst_confidence", "low")
+
+            customer_name = parsed.get("customer_name", pending.customer_name)
+            pending.items       = bill_items
+            pending.customer_name = customer_name
+            pending.confidence  = parsed.get("confidence", 1.0)
+            pending.warnings    = parsed.get("warnings", [])
+            pending.raw_message = message
+            pending.is_return   = is_return
+            pending.created_at  = datetime.now()
+            store_pending(from_number, pending)
+            send(from_number, msg_preview(pending))
+            return
+    except Exception as e:
+        log.debug(f"Natural correction parse failed: {e}")
+
+    # Truly unknown command → re-show preview
+    send(from_number, f"❓ Unknown command. See options below:\n")
+    send(from_number, msg_preview(pending))
 
 
 def _handle_state_selection(from_number: str, message: str,
@@ -775,6 +1064,7 @@ def _handle_state_selection(from_number: str, message: str,
     pending.customer_state      = state_name
     pending.customer_state_code = state_code
     pending.awaiting_state      = False
+    pending.state_assumed       = False
     pending.created_at          = datetime.now()
     store_pending(from_number, pending)
 
@@ -808,17 +1098,21 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
             state_code = pending.customer_state_code,
         )
         items = [
-            BillItem(name=i["name"], qty=i["qty"], price=i["price"])
+            BillItem(
+                name=i["name"], qty=i["qty"], price=abs(i["price"]),
+                hsn=i.get("hsn", ""), gst_rate=i.get("gst_rate", 18),
+            )
             for i in pending.items
         ]
 
-        invoice_number = generate_invoice_number(pending.shop_id)
+        invoice_number = generate_invoice_number(pending.shop_id, is_return=pending.is_return)
         pdf_path, bill_result = generate_pdf_bill(
             shop           = shop,
             customer       = customer,
             items          = items,
             invoice_number = invoice_number,
             gst_client     = get_anthropic_client(),
+            is_return      = pending.is_return,
         )
 
         # Save to database
@@ -833,6 +1127,7 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
                 pdf_path       = pdf_path,
                 raw_message    = pending.raw_message,
                 confidence     = pending.confidence,
+                is_return      = pending.is_return,
             )
         except Exception as e:
             log.error(f"DB save failed (non-fatal): {e}")
@@ -849,19 +1144,22 @@ def _generate_confirmed_bill(from_number: str, pending: PendingBill,
             invoice_number = invoice_number,
             customer_name  = pending.customer_name,
             days           = d_left,
+            is_return      = pending.is_return,
         )
         send(from_number, summary)
 
+        doc_label = "Credit Note" if pending.is_return else "Invoice"
+        sign = "-" if pending.is_return else ""
         send_pdf(
             to       = from_number,
             pdf_path = pdf_path,
-            caption  = f"📄 Invoice {invoice_number} — Rs.{bill_result.grand_total:.2f}",
+            caption  = f"📄 {doc_label} {invoice_number} — {sign}Rs.{abs(bill_result.grand_total):.2f}",
         )
 
         log.info(
-            f"Bill generated: {invoice_number} "
+            f"{'Credit note' if pending.is_return else 'Bill'} generated: {invoice_number} "
             f"for {pending.shop_name} "
-            f"total=Rs.{bill_result.grand_total:.2f}"
+            f"total={sign}Rs.{abs(bill_result.grand_total):.2f}"
             f"{' [IGST]' if bill_result.is_igst else ''}"
         )
 
@@ -970,6 +1268,10 @@ def handle_message(from_number: str, message: str):
             send(from_number, msg_history(shop_id))
             return
 
+        if msg_lower.startswith("gst report"):
+            _handle_gst_report(from_number, msg_lower, shop_id, shop_name)
+            return
+
         if msg_lower in ("hi", "hello", "hai", "start"):
             send(from_number, msg_help(shop_name, d_left))
             return
@@ -984,6 +1286,14 @@ def handle_message(from_number: str, message: str):
                 _handle_state_selection(from_number, message, pending, d_left)
             else:
                 _handle_confirmation(from_number, msg_lower, message, pending, reg, d_left)
+            return
+
+        # ── Catch orphan confirmation commands (no pending bill / expired) ──
+        if _is_confirmation_command(msg_lower):
+            send(from_number,
+                "⏰ Session expired. Please send items again.\n\n"
+                "_Example: phone case 299 charger 499 customer Suresh_"
+            )
             return
 
         # ── New bill message → parse and show preview ──
@@ -1069,6 +1379,23 @@ def serve_bill(filename):
         )
     except Exception:
         return {"error": "Bill not found"}, 404
+
+
+@app.route("/reports/<filename>", methods=["GET"])
+def serve_report(filename):
+    """Serve GST report PDFs (validated filename)."""
+    if not re.match(r'^[\w\-]+\.pdf$', filename):
+        return {"error": "Invalid filename"}, 400
+    from flask import send_from_directory
+    reports_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
+    try:
+        return send_from_directory(
+            os.path.abspath(reports_folder),
+            filename,
+            mimetype="application/pdf",
+        )
+    except Exception:
+        return {"error": "Report not found"}, 404
 
 
 @app.route("/admin/registrations", methods=["GET"])

@@ -32,7 +32,7 @@ MID_GRAY    = colors.HexColor("#dee2e6")
 TEXT_GRAY   = colors.HexColor("#6c757d")
 WHITE       = colors.white
 BLACK       = colors.black
-VALID_GST_SLABS  = {0, 5, 12, 18, 28}
+VALID_GST_SLABS  = {0, 3, 5, 12, 18, 28}
 GSTIN_REGEX      = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$")
 PLACEHOLDER_GSTIN = "GSTIN00000000000"
  
@@ -143,11 +143,14 @@ class BillResult:
 # INVOICE NUMBER — DB backed (survives redeploys)
 # ════════════════════════════════════════════════
 
-def generate_invoice_number(shop_id: str) -> str:
+def generate_invoice_number(shop_id: str, is_return: bool = False) -> str:
     """
     Generate next sequential invoice number.
     Stored in DB via SQLAlchemy — survives server restarts and redeploys.
     Thread-safe via mutex + row-level lock.
+
+    is_return=True → prefix "CN" (Credit Note) instead of BILL_PREFIX.
+    Credit notes use a separate sequence key to avoid gaps in invoice numbering.
     """
     if not shop_id.strip():
         raise ValueError("shop_id cannot be empty")
@@ -156,11 +159,18 @@ def generate_invoice_number(shop_id: str) -> str:
 
     shop_key = shop_id.upper().strip()
     year     = datetime.now().strftime("%Y")
-    sequence = generate_next_sequence(shop_key, year)
 
-    from config import BILL_PREFIX
-    invoice_no = f"{BILL_PREFIX}-{year}-{shop_key}-{sequence:05d}"
-    log.info(f"Generated invoice: {invoice_no}")
+    if is_return:
+        prefix = "CN"
+        seq_key = f"CN_{shop_key}"
+    else:
+        from config import BILL_PREFIX
+        prefix = BILL_PREFIX
+        seq_key = shop_key
+
+    sequence = generate_next_sequence(seq_key, year)
+    invoice_no = f"{prefix}-{year}-{shop_key}-{sequence:05d}"
+    log.info(f"Generated {'credit note' if is_return else 'invoice'}: {invoice_no}")
     return invoice_no
 
 
@@ -226,7 +236,7 @@ def calculate_bill(
     intra = is_intra_state(shop_state_code, customer_state_code)
     log.info(f"Tax type: {'CGST+SGST (intra-state)' if intra else 'IGST (inter-state)'}")
 
-    from gst_rates import get_gst_rate_smart
+    from gst_rates import get_gst_rate_smart, adjust_gst_for_price
     processed = []
     subtotal  = 0.0
 
@@ -236,14 +246,22 @@ def calculate_bill(
         qty   = round(float(item.qty), 3)
         price = round(float(item.price), 2)
 
-        try:
-            rate_info = get_gst_rate_smart(name, gst_client)
-        except Exception as e:
-            log.warning(f"GST lookup failed for '{name}': {e} — using default 18%")
-            rate_info = {"hsn": "9999", "gst": 18}
+        # Use pre-resolved rates if available (set during preview),
+        # otherwise look up fresh — keeps preview and final bill in sync.
+        if item.hsn:
+            hsn      = item.hsn
+            gst_rate = item.gst_rate
+        else:
+            try:
+                rate_info = get_gst_rate_smart(name, gst_client)
+            except Exception as e:
+                log.warning(f"GST lookup failed for '{name}': {e} — using default 18%")
+                rate_info = {"hsn": "9999", "gst": 18}
 
-        hsn      = rate_info.get("hsn", "9999")
-        gst_rate = rate_info.get("gst", 18)
+            # Apply price-based slab (clothing/footwear)
+            rate_info = adjust_gst_for_price(name, price, rate_info)
+            hsn      = rate_info.get("hsn", "9999")
+            gst_rate = rate_info.get("gst", 18)
 
         if gst_rate not in VALID_GST_SLABS:
             log.warning(f"Invalid slab {gst_rate}% for '{name}' — correcting to 18%")
@@ -329,25 +347,42 @@ def generate_pdf_bill(
     invoice_number: str,
     gst_client=None,
     save_path:      str | None = None,
+    is_return:      bool = False,
 ) -> tuple[str, BillResult]:
     """
     Generate a GST bill PDF.
     Returns (pdf_path, bill_result).
- 
+
     Bill type:
-    - Shop WITH GSTIN  → TAX INVOICE
-    - Shop WITHOUT GSTIN → BILL OF SUPPLY
+    - is_return=True       → CREDIT NOTE
+    - Shop WITH GSTIN      → TAX INVOICE
+    - Shop WITHOUT GSTIN   → BILL OF SUPPLY
     """
-    log.info(f"Generating bill {invoice_number} for {shop.name}")
+    log.info(f"Generating {'credit note' if is_return else 'bill'} {invoice_number} for {shop.name}")
     shop.validate()
     customer.validate()
     if not items:
         raise ValueError("Items list is empty")
     if not invoice_number.strip():
         raise ValueError("Invoice number cannot be empty")
- 
+
     bill = calculate_bill(items, gst_client, shop.state_code, customer.state_code)
- 
+
+    # For credit notes, negate all monetary values in the result
+    if is_return:
+        bill = BillResult(
+            items=[BillItem(
+                name=i.name, qty=i.qty, price=-i.price, hsn=i.hsn,
+                gst_rate=i.gst_rate, cgst=-i.cgst, sgst=-i.sgst,
+                igst=-i.igst, total=-i.total,
+            ) for i in bill.items],
+            subtotal=-bill.subtotal,
+            total_cgst=-bill.total_cgst, total_sgst=-bill.total_sgst,
+            total_igst=-bill.total_igst, total_gst=-bill.total_gst,
+            grand_total=-bill.grand_total, is_igst=bill.is_igst,
+            in_words=bill.in_words,
+        )
+
     from config import BILLS_FOLDER, PLATFORM_NAME, PLATFORM_TAGLINE, PLATFORM_SUPPORT
     os.makedirs(BILLS_FOLDER, exist_ok=True)
  
@@ -368,18 +403,22 @@ def generate_pdf_bill(
     HW    = PAGE_W / 2
  
     # ── HEADER ──
-    # Shows BILL OF SUPPLY or TAX INVOICE based on GSTIN
+    # Shows CREDIT NOTE / TAX INVOICE / BILL OF SUPPLY
+    if is_return:
+        doc_type = "CREDIT NOTE"
+        doc_sub  = "Return / Refund"
+    else:
+        doc_type = shop.invoice_type
+        doc_sub  = "GST Registered" if shop.has_gstin else "Composition / Unregistered"
+
     ht = Table([[
         [
             Paragraph(PLATFORM_NAME, s["brand_white"]),
             Paragraph(PLATFORM_TAGLINE, s["tagline_white"]),
         ],
         [
-            Paragraph(shop.invoice_type, s["invoice_white"]),
-            Paragraph(
-                "GST Registered" if shop.has_gstin else "Composition / Unregistered",
-                s["bill_type"]
-            ),
+            Paragraph(doc_type, s["invoice_white"]),
+            Paragraph(doc_sub, s["bill_type"]),
         ],
     ]], colWidths=[HW, HW])
     ht.setStyle(TableStyle([

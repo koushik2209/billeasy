@@ -99,6 +99,7 @@ def save_bill(
     pdf_path:       str,
     raw_message:    str = "",
     confidence:     float = 1.0,
+    is_return:      bool = False,
 ):
     """Persist bill to database."""
     items_data = [
@@ -129,6 +130,7 @@ def save_bill(
             total_gst      = bill_result.total_gst,
             grand_total    = bill_result.grand_total,
             is_igst        = bill_result.is_igst,
+            is_return      = is_return,
             pdf_path       = pdf_path,
             raw_message    = raw_message,
             confidence     = confidence,

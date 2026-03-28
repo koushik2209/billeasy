@@ -4,7 +4,7 @@
 
 1. **Claude for NLP, not rules**: The core value prop is that shopkeepers type in natural language (including Telugu/Hindi). Claude extracts structured item data. A regex fallback exists but is secondary (confidence capped at 0.6).
 
-2. **5-step GST rate resolution**: Exact match → word-boundary match → fuzzy (rapidfuzz, threshold 75) → JSON file cache → Claude API. This minimizes API calls while handling obscure items. Cache persists in `gst_cache.json` (absolute path, thread-safe writes).
+2. **5-step GST rate resolution + price slabs + confidence**: Exact match → word-boundary → fuzzy (rapidfuzz, threshold 75) → JSON cache → Claude API. Each step returns `source` + `confidence` (high/medium/low). After lookup, `adjust_gst_for_price()` applies price-based slabs: clothing ≤₹1000 → 5%, >₹1000 → 12%; footwear ≤₹1000 → 5%, >₹1000 → 18%. Manual overrides never overridden. Preview shows: high=clean, medium=`~` marker, low=`⚠️` + "GST assumed" warning. CLOTHING_KEYWORDS and FOOTWEAR_KEYWORDS expanded (hoodie, top, skirt, blazer, jogger, shoe, sandals, loafer, etc.).
 
 3. **DB-backed invoice sequences**: Invoice numbers use `InvoiceSequence` table with thread lock + `WITH FOR UPDATE` row lock. This replaced a JSON file approach to survive redeploys.
 
@@ -14,9 +14,13 @@
 
 6. **Conversation state machine**: Registration is a multi-step flow (NEW → ASKED_NAME → ASKED_ADDRESS → ASKED_GSTIN → ACTIVE → EXPIRED). State stored in `Registration.state` column.
 
-7. **Bill preview/confirmation flow**: After parsing, bills are NOT generated immediately. A preview is shown with items, customer name, and tax type. User must reply YES to confirm. Can modify name (`NAME Ravi`), state (`STATE` → state selection sub-flow), re-enter items (`EDIT`), or `CANCEL`. Pending bills stored in-memory (`_pending_bills` dict, keyed by phone, thread-safe, 10-minute expiry). Commands like `help`, `today`, `history` still work during confirmation mode.
+7. **GST Report system**: `reports.py` handles monthly and date-range GST summaries. WhatsApp command `gst report [range]` triggers DB aggregation → WhatsApp text + PDF. Supports: empty (current month), "last N days", "last month", "this month", month names. PDF generated via ReportLab, saved in `reports/` folder. Indian number formatting (lakh/crore system). `GSTReport` dataclass holds all fields.
+
+8. **Bill preview/confirmation flow**: After parsing, bills are NOT generated immediately. A preview is shown with items, customer name, and tax type. User must reply YES to confirm. Can modify name (`NAME Ravi`), state (`STATE` → state selection sub-flow), re-enter items (`EDIT`), or `CANCEL`. Pending bills stored in-memory (`_pending_bills` dict, keyed by phone, thread-safe, 10-minute expiry). Commands like `help`, `today`, `history` still work during confirmation mode. **Natural correction**: if user sends a new item-like message while a pending bill exists, it's auto-parsed and replaces the pending bill (no need to EDIT first). Credit note previews show a minimal command list (YES/EDIT/CANCEL only).
 
 8. **TAX INVOICE vs BILL OF SUPPLY**: If shop has valid GSTIN (regex-validated) → TAX INVOICE with full CGST/SGST breakdown. If placeholder/empty/invalid → BILL OF SUPPLY with no tax columns in PDF. Controlled by `ShopProfile.has_gstin` property.
+
+9. **Return / Credit Note support**: `return_detector.py` detects return intent via 3-tier rule-based logic (keyword regex → rapidfuzz partial match → majority-negative prices). No external API calls. Credit notes use `CN-` prefixed invoice numbers with separate DB sequence (avoids gaps in regular invoices). `PendingBill.is_return` flag flows through preview, confirmation, PDF generation, and DB storage. `Bill.is_return` column in database. PDF shows "CREDIT NOTE" header. All amounts negated after `calculate_bill` (which always works with positive values internally). Preview and summary show "REFUND" label and negative amounts.
 
 ---
 
@@ -63,6 +67,19 @@
 - 200+ hardcoded items with HSN codes across 12 categories
 - Fuzzy matching uses rapidfuzz `WRatio` scorer (combines multiple strategies)
 - Claude fallback asks for HSN + GST rate, validates against 5 legal slabs, caches result
+- Returns `source` field: `exact`, `fuzzy`, `cache`, `claude`, `default` — used downstream to flag uncertain rates in preview
+
+### Preview/Final Bill Rate Consistency
+- GST rates resolved at preview time via `get_gst_rate_smart` with full Claude client
+- Stored as `hsn`, `gst_rate`, `gst_source` in each item dict within `PendingBill.items`
+- `calculate_bill()` skips GST lookup if `BillItem.hsn` is pre-filled — uses stored rates
+- This ensures preview totals match final bill/PDF exactly
+- User can override any item's GST rate: `GST <item#> <rate>` (e.g., `GST 1 12`)
+
+### Orphan Confirmation Command Handling
+- `_is_confirmation_command()` detects YES/CANCEL/EDIT/NAME/STATE/GST commands
+- If sent with no pending bill, returns helpful "no pending bill" message
+- Prevents confusing parse errors when user sends "YES" after pending expires
 
 ---
 
