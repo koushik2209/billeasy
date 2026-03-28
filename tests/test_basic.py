@@ -1429,3 +1429,68 @@ def test_utensil_gst():
     for item in ["utensil", "steel utensil", "steel"]:
         rate = get_gst_rate_smart(item)
         assert rate["gst"] == 12, f"{item} expected 12% got {rate['gst']}%"
+
+
+# ════════════════════════════════════════════════
+# EDGE CASE FIXES — whitelist override + ambiguity
+# ════════════════════════════════════════════════
+
+def test_send_back_cover_is_return():
+    """'send back cover 200' — strong verb 'send back' overrides 'back cover' whitelist."""
+    from return_detector import detect_return_intent
+    items = [{"name": "cover", "qty": 1, "price": 200}]
+    assert detect_return_intent("send back cover 200", items) is True
+
+
+def test_return_back_cover_is_return():
+    """'return back cover 200' — 'returned' is a strong verb, overrides whitelist."""
+    from return_detector import detect_return_intent
+    items = [{"name": "back cover", "qty": 1, "price": 200}]
+    assert detect_return_intent("want to return back cover 200", items) is True
+
+
+def test_back_cover_still_not_return():
+    """'back cover 200' — no strong verb, still NOT a return."""
+    from return_detector import detect_return_intent
+    items = [{"name": "back cover", "qty": 1, "price": 200}]
+    assert detect_return_intent("back cover 200", items) is False
+
+
+def test_ambiguous_compact_xqty():
+    """'pen10x5' triggers ambiguous_parse warning."""
+    from claude_parser import _regex_parse_message
+    result = _regex_parse_message("pen10x5")
+    assert "ambiguous_parse" in result["warnings"]
+
+
+def test_ambiguous_long_number():
+    """'shirt1002' triggers ambiguous_parse warning (4+ digit compact)."""
+    from claude_parser import _regex_parse_message
+    result = _regex_parse_message("shirt1002")
+    assert "ambiguous_parse" in result["warnings"]
+
+
+def test_no_ambiguity_for_normal_input():
+    """'shirt 500' should NOT trigger ambiguity warning."""
+    from claude_parser import _regex_parse_message
+    result = _regex_parse_message("shirt 500")
+    assert "ambiguous_parse" not in result["warnings"]
+
+
+def test_ambiguity_shown_in_preview():
+    """Ambiguous parse warning appears in preview message."""
+    from whatsapp_webhook import msg_preview, PendingBill
+    from datetime import datetime
+    pending = PendingBill(
+        phone="test", shop_id="TEST", shop_name="Test Shop",
+        shop_state="Telangana", shop_state_code="36",
+        customer_name="Test", customer_state="Telangana",
+        customer_state_code="36",
+        items=[{"name": "pen", "qty": 1, "price": 10.0,
+                "hsn": "9608", "gst_rate": 18, "gst_source": "exact",
+                "gst_confidence": "high"}],
+        confidence=0.6, warnings=["ambiguous_parse"], raw_message="pen10x5",
+        created_at=datetime.utcnow(),
+    )
+    preview = msg_preview(pending)
+    assert "verify quantity and price" in preview.lower()

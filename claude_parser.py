@@ -383,13 +383,24 @@ def _regex_parse_message(message: str) -> dict:
 
     notes_parts.insert(0, "Parsed by regex fallback (Claude API unavailable)")
 
+    # Detect ambiguous compact inputs (e.g., "pen10x5", "shirt1002")
+    # where the digit boundary between name/price/qty is unclear
+    ambiguous_parse = bool(re.search(
+        r"[a-zA-Z]\d+[xX×]\d+|[a-zA-Z]\d{4,}",
+        message,
+    ))
+
+    warnings = []
+    if ambiguous_parse and unique_items:
+        warnings.append("ambiguous_parse")
+
     return {
         "customer_name": customer_name,
         "items":         unique_items[:MAX_ITEMS_PER_BILL],
         "confidence":    0.6 if unique_items else 0.0,
         "notes":         "; ".join(notes_parts),
         "error":         None if unique_items else "No items found by fallback parser",
-        "warnings":      [],
+        "warnings":      warnings,
         "parse_time_ms": 0,
     }
 

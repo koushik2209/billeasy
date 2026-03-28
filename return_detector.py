@@ -40,6 +40,18 @@ _FALSE_POSITIVE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# ── Strong return verbs that override the whitelist ──
+# If BOTH a product phrase AND a strong verb are present, it IS a return.
+_STRONG_RETURN_VERBS = [
+    "want to return", "returned", "refund", "credit note",
+    "give back", "send back", "sent back", "take back",
+    "cancel order", "cancelled order",
+]
+_STRONG_RETURN_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(v) for v in _STRONG_RETURN_VERBS) + r")\b",
+    re.IGNORECASE,
+)
+
 
 def _keyword_match(message: str) -> bool:
     """Check if message contains return-related keywords (regex word-boundary).
@@ -112,15 +124,23 @@ def detect_return_intent(message: str, parsed_items: list) -> bool:
 
     Returns True if this should be a credit note.
     """
-    # Whitelist check: if message contains known product phrases, skip text-based detection
+    # Whitelist check: product phrases suppress return detection UNLESS
+    # a strong return verb is also present (e.g., "send back cover" has both
+    # "back cover" and "send back" — the strong verb wins).
     has_product_phrase = bool(_FALSE_POSITIVE_PATTERN.search(message))
+    has_strong_verb = bool(_STRONG_RETURN_PATTERN.search(message))
 
-    # Keyword match — strongest signal
+    # Strong verb always wins, even with product phrase present
+    if has_strong_verb:
+        log.info(f"Return detected: strong verb in '{message[:60]}'")
+        return True
+
+    # Keyword match — strongest signal (blocked by product phrases)
     if not has_product_phrase and _keyword_match(message):
         log.info(f"Return detected: keyword match in '{message[:60]}'")
         return True
 
-    # Fuzzy match — catches typos like "retun", "refnd"
+    # Fuzzy match — catches typos like "retun", "refnd" (blocked by product phrases)
     if not has_product_phrase and _fuzzy_match(message):
         log.info(f"Return detected: fuzzy match in '{message[:60]}'")
         return True

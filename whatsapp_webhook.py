@@ -741,6 +741,10 @@ def msg_preview(pending: PendingBill) -> str:
     if pending.confidence < 0.8:
         lines.append(f"\n⚠️ _Some items may be incorrect. Please verify._")
 
+    # ── Ambiguous parse warning ──
+    if "ambiguous_parse" in pending.warnings:
+        lines.append(f"\n⚠️ _Please verify quantity and price for some items._")
+
     # ── Commands ──
     lines.append(f"\n━━━━━━━━━━━━━━━━━")
     lines.append(f"Reply:")
