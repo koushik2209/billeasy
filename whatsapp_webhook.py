@@ -9,7 +9,7 @@ Features:
 - 10 day free trial tracking
 - Bill generation pipeline
 - Bill history and daily summary
-- Twilio request signature validation
+- Meta WhatsApp Cloud API (Graph) — verify token + JSON webhook
 - Graceful error handling
 """
 
@@ -18,17 +18,18 @@ import re
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from flask import Flask, request
-from twilio.twiml.messaging_response import MessagingResponse
-from twilio.request_validator import RequestValidator
+from flask import Flask, request, Response
 
 from config import (
-    TWILIO_ACCOUNT_SID,
-    TWILIO_AUTH_TOKEN,
-    TWILIO_WHATSAPP_NUMBER,
     PLATFORM_NAME,
     BASE_URL,
+    VERIFY_TOKEN,
     get_anthropic_client,
+)
+from whatsapp_client import (
+    send_text_message,
+    send_document_by_link,
+    parse_meta_webhook_payload,
 )
 from claude_parser import parse_message
 from gst_rates import get_gst_rate_smart, adjust_gst_for_price
@@ -63,20 +64,6 @@ log = logging.getLogger("billedup.whatsapp")
 
 # ── Flask ──
 app = Flask(__name__)
-
-# ── Lazy Twilio client (avoids crash when creds are missing) ──
-_twilio_client = None
-
-def get_twilio_client():
-    global _twilio_client
-    if _twilio_client is None:
-        if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
-            raise RuntimeError(
-                "TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN must be set"
-            )
-        from twilio.rest import Client
-        _twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    return _twilio_client
 
 # ════════════════════════════════════════════════
 # CONVERSATION STATE MACHINE
@@ -414,13 +401,12 @@ def is_valid_gstin(gstin: str) -> bool:
 # ════════════════════════════════════════════════
 
 def send(to: str, body: str):
-    """Send WhatsApp message via Twilio."""
+    """Send WhatsApp message via Meta Cloud API."""
     try:
-        get_twilio_client().messages.create(
-            from_ = TWILIO_WHATSAPP_NUMBER,
-            to    = to,
-            body  = body,
-        )
+        result = send_text_message(to, body)
+        if result.get("error"):
+            log.error(f"Send failed to {to}: {result.get('error')}")
+            return
         log_message(to, "OUT", body)
         log.info(f"Sent to {to} ({len(body)} chars)")
     except Exception as e:
@@ -428,30 +414,38 @@ def send(to: str, body: str):
 
 
 def send_pdf(to: str, pdf_path: str, caption: str = "", url_prefix: str = "bills"):
-    """Send a PDF as a WhatsApp media message via Twilio.
+    """Send a PDF as a WhatsApp document (public HTTPS URL required).
 
-    Requires BASE_URL to be set so Twilio can fetch the file.
     url_prefix: "bills" for invoices, "reports" for GST reports.
-    Falls back to a text-only notice if BASE_URL is not configured.
     """
     filename = os.path.basename(pdf_path)
 
     if not BASE_URL:
         log.warning("BASE_URL not set — cannot send PDF media. Sending text fallback.")
-        send(to, f"📄 Your PDF is ready: {filename}\n(Ask shop to share the file)")
+        send(
+            to,
+            f"📄 Your PDF is ready: {filename}\n(Configure BASE_URL for document delivery)",
+        )
         return
 
-    media_url = f"{BASE_URL}/{url_prefix}/{filename}"
+    media_url = f"{BASE_URL.rstrip('/')}/{url_prefix}/{filename}"
     log.info(f"Sending PDF: {media_url} to {to}")
     try:
-        msg = get_twilio_client().messages.create(
-            from_     = TWILIO_WHATSAPP_NUMBER,
-            to        = to,
-            body      = caption or f"📄 Invoice: {filename}",
-            media_url = [media_url],
+        result = send_document_by_link(
+            to,
+            media_url,
+            filename,
+            caption or f"📄 {filename}",
         )
+        if result.get("error"):
+            log.error(f"PDF send failed to {to}: {result.get('error')}")
+            send(
+                to,
+                f"📄 Your bill PDF is ready but could not be attached.\nFilename: {filename}",
+            )
+            return
         log_message(to, "OUT", f"[PDF] {media_url}")
-        log.info(f"PDF sent to {to}: sid={msg.sid} status={msg.status}")
+        log.info(f"PDF sent to {to}")
     except Exception as e:
         log.error(f"PDF send failed to {to}: {e}", exc_info=True)
         send(to, f"📄 Your bill PDF is ready but could not be attached.\nFilename: {filename}")
@@ -1355,44 +1349,49 @@ def handle_message(from_number: str, message: str):
 # FLASK ROUTES
 # ════════════════════════════════════════════════
 
-@app.route("/webhook", methods=["POST"])
+def verify_meta_webhook():
+    """GET /webhook — Meta subscription verification (hub.challenge)."""
+    mode = request.args.get("hub.mode")
+    token = request.args.get("hub.verify_token")
+    challenge = request.args.get("hub.challenge")
+    if mode == "subscribe" and token == VERIFY_TOKEN and challenge:
+        log.info("WhatsApp webhook verified (GET)")
+        return Response(challenge, status=200, mimetype="text/plain")
+    log.warning("WhatsApp webhook verification failed")
+    return "Forbidden", 403
+
+
+def handle_meta_webhook_post():
+    """POST /webhook — incoming messages."""
+    body = request.get_json(silent=True)
+    if body is None:
+        return "", 200
+
+    messages = parse_meta_webhook_payload(body)
+    for msg in messages:
+        from_number = msg["from"]
+        incoming_msg = msg["text"]
+        log.info(f"Incoming: {from_number} — '{incoming_msg[:80]}'")
+
+        try:
+            handle_message(from_number, incoming_msg)
+        except Exception as e:
+            log.error(f"Webhook error: {e}", exc_info=True)
+            send(
+                from_number,
+                "Something went wrong. Please try again.\n"
+                "Support: +91 7981053846",
+            )
+
+    return "", 200
+
+
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    """Main WhatsApp webhook — receives all incoming messages."""
-    # Validate Twilio request signature
-    if TWILIO_AUTH_TOKEN:
-        validator = RequestValidator(TWILIO_AUTH_TOKEN)
-        signature = request.headers.get("X-Twilio-Signature", "")
-        # Use public URL for validation (Railway proxies HTTPS → HTTP internally)
-        url = BASE_URL + "/webhook" if BASE_URL else request.url
-        if not validator.validate(url, request.form, signature):
-            log.warning(f"Invalid Twilio signature from {request.remote_addr}")
-            return "Forbidden", 403
-
-    incoming_msg = request.values.get("Body", "").strip()
-    from_number  = request.values.get("From", "")
-    num_media    = int(request.values.get("NumMedia", 0))
-
-    log.info(f"Incoming: {from_number} — '{incoming_msg[:80]}'")
-
-    # Ignore media
-    if num_media > 0:
-        send(from_number, "Please send text messages only.")
-        return str(MessagingResponse())
-
-    if not incoming_msg:
-        return str(MessagingResponse())
-
-    # Handle message
-    try:
-        handle_message(from_number, incoming_msg)
-    except Exception as e:
-        log.error(f"Webhook error: {e}", exc_info=True)
-        send(from_number,
-            "Something went wrong. Please try again.\n"
-            "Support: +91 7981053846"
-        )
-
-    return str(MessagingResponse())
+    """Meta WhatsApp Cloud API — verify (GET) or receive messages (POST)."""
+    if request.method == "GET":
+        return verify_meta_webhook()
+    return handle_meta_webhook_post()
 
 
 @app.route("/health", methods=["GET"])
@@ -1612,22 +1611,24 @@ if __name__ == "__main__":
     print("  BilledUp WhatsApp Webhook — Production")
     print("  Bill smarter. Grow faster.")
     print("="*55)
-    print(f"  Twilio number  : {TWILIO_WHATSAPP_NUMBER}")
+    print(f"  Phone number ID: {os.getenv('WHATSAPP_PHONE_NUMBER_ID', '(set in .env)')}")
     print(f"  Webhook URL    : http://localhost:5000/webhook")
     print(f"  Health check   : http://localhost:5000/health")
     print(f"  Admin panel    : http://localhost:5000/admin/registrations")
     print("="*55)
     print("\n  Shopkeeper self-registration flow:")
     print("  1. Shopkeeper clicks button on website")
-    print("  2. WhatsApp opens — sends message to Twilio number")
+    print("  2. WhatsApp opens — messages your Meta WhatsApp number")
     print("  3. Bot asks shop name → address → GSTIN")
     print("  4. 10 day trial activated automatically")
     print("  5. Shopkeeper starts billing immediately")
     print("="*55)
-    print("\n  ngrok setup (run in second terminal):")
-    print("  .\\ngrok.exe http 5000")
-    print("  Then set webhook in Twilio console to:")
-    print("  https://YOUR-NGROK-URL/webhook")
+    print("\n  Meta Cloud API:")
+    print("  1. Run ngrok (or Railway) exposing port 5000")
+    print("  2. Meta Developer → WhatsApp → Configuration:")
+    print("     Callback URL: https://YOUR-PUBLIC-URL/webhook")
+    print("     Verify token: VERIFY_TOKEN from .env")
+    print("  3. Set BASE_URL to the same public origin (for PDF links)")
     print("="*55 + "\n")
 
     port = int(os.environ.get("PORT", 5000))

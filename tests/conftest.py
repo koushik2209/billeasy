@@ -22,4 +22,7 @@ atexit.register(_cleanup)
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-ant-api03-test-placeholder-not-a-real-key")
 os.environ.setdefault("PLATFORM_NAME", "BilledUp")
 os.environ.setdefault("PLATFORM_SUPPORT_PHONE", "+91 99999 99999")
+os.environ.setdefault("WHATSAPP_PHONE_NUMBER_ID", "000000000000000")
+os.environ.setdefault("WHATSAPP_ACCESS_TOKEN", "test-whatsapp-token")
+os.environ.setdefault("VERIFY_TOKEN", "test-verify-token")
 os.environ["DATABASE_URL"] = _db_url

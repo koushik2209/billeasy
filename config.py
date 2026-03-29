@@ -54,10 +54,10 @@ def get_config_summary():
         "bills_folder": BILLS_FOLDER,
         "api_key_loaded": bool(ANTHROPIC_API_KEY),
     }
-# ── Twilio WhatsApp ──
-TWILIO_ACCOUNT_SID     = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN      = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER")
+# ── Meta WhatsApp Cloud API ──
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+WHATSAPP_ACCESS_TOKEN    = os.getenv("WHATSAPP_ACCESS_TOKEN")
+VERIFY_TOKEN             = os.getenv("VERIFY_TOKEN")
 
 # ── Public base URL ──
 BASE_URL = os.getenv("BASE_URL", "https://web-production-91c36.up.railway.app")

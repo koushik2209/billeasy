@@ -10,7 +10,7 @@
 
 4. **SQLAlchemy dual-database**: SQLite locally, PostgreSQL in production. `DATABASE_URL` env var switches between them. Tests use a temp SQLite file (see `conftest.py`).
 
-5. **Lazy client initialization**: Both Anthropic and Twilio clients are singletons created on first use — prevents crashes when credentials are missing for unused features.
+5. **Lazy Anthropic client**: Singleton created on first use (`get_anthropic_client()`). WhatsApp sends go through `whatsapp_client.py` (Meta Graph API) using env `WHATSAPP_*`.
 
 6. **Conversation state machine**: Registration is a multi-step flow (NEW → ASKED_NAME → ASKED_ADDRESS → ASKED_GSTIN → ACTIVE → EXPIRED). State stored in `Registration.state` column.
 
@@ -88,10 +88,10 @@
 1. **No authentication on admin endpoints**: `/admin/registrations` is publicly accessible
 2. **Demo shop hardcoded**: "Ravi Mobile Accessories" with GSTIN `36AABCU9603R1ZX` auto-seeded
 3. **No payment integration**: Trial expiry requires manual upgrade via WhatsApp support
-4. **PDF serving requires BASE_URL**: Twilio needs a public URL to fetch PDFs. Without ngrok/Railway URL, PDFs can't be sent as media.
+4. **PDF serving requires BASE_URL**: Meta document messages need a public HTTPS URL for the PDF; configure `BASE_URL` so `/bills/` and `/reports/` are reachable.
 5. **No multi-language output**: Bills are always in English. Only input supports Telugu/Hindi.
 6. **HSN codes are best-effort**: Disclaimer in README — verify with CA before filing.
-7. **Twilio signature validation**: Only validates when `TWILIO_AUTH_TOKEN` is set. In dev without it, requests are not validated.
+7. **Meta webhook verification**: GET `/webhook` uses `VERIFY_TOKEN` vs `hub.verify_token`. Optional: validate `X-Hub-Signature-256` on POST in production.
 8. **`config.py` raises on import**: If `ANTHROPIC_API_KEY` is missing, import fails immediately. Tests work around this with `conftest.py` setting env vars before import.
 
 ---
@@ -104,7 +104,7 @@
 - **Invoice number format**: `{BILL_PREFIX}-{YEAR}-{SHOP_KEY}-{SEQUENCE:05d}`. Changing format requires updating `generate_invoice_number()` in `bill_generator.py`.
 - **Test strategy**: `conftest.py` sets up a temp SQLite DB and fake API key before any imports. Tests avoid live API calls. Run with `pytest`.
 - **Deployment**: Railway via Procfile — `gunicorn whatsapp_webhook:app` with 4 workers. Port from `$PORT` env var.
-- **WhatsApp webhook URL**: Must be configured in Twilio console pointing to `{BASE_URL}/webhook`.
+- **WhatsApp webhook URL**: Configure in Meta Developer → WhatsApp → Configuration: callback `{BASE_URL}/webhook`, verify token = `VERIFY_TOKEN`.
 
 ---
 
@@ -124,7 +124,7 @@
 
 6. **Thread safety**: Invoice sequence uses both a Python `threading.Lock` and SQL `WITH FOR UPDATE`. The Python lock is needed because SQLite doesn't support row-level locking. GST cache also uses a threading lock for concurrent worker safety.
 
-7. **Twilio client is lazy**: Created on first `get_twilio_client()` call. If Twilio creds are missing, the webhook will crash only when trying to send (not on startup).
+7. **Meta WhatsApp sends**: `send_text_message` / `send_document_by_link` need `WHATSAPP_PHONE_NUMBER_ID` and `WHATSAPP_ACCESS_TOKEN`; missing values surface as API errors when sending.
 
 8. **`number_to_words` uses Indian numbering**: Lakh (100,000) and Crore (10,000,000) system, not million/billion. Negative amounts return empty string (guarded).
 

@@ -7,13 +7,13 @@
 ## Architecture (High-Level)
 
 ```
-WhatsApp (Twilio) → Flask Webhook → Claude Parser → Bill Calculator → PDF Generator → DB + WhatsApp Reply
+WhatsApp (Meta Cloud API) → Flask Webhook → Claude Parser → Bill Calculator → PDF Generator → DB + WhatsApp Reply
                                                           ↓
                                                    GST Rate Lookup (hardcoded + fuzzy + Claude fallback)
 ```
 
 Two entry points:
-1. **WhatsApp webhook** (`whatsapp_webhook.py`) — production, Twilio-based
+1. **WhatsApp webhook** (`whatsapp_webhook.py`) — production, Meta WhatsApp Cloud API
 2. **Interactive CLI** (`main.py`) — demo/testing terminal loop
 
 ---
@@ -29,15 +29,16 @@ Two entry points:
 | `claude_parser.py` | Sends shopkeeper messages to Claude API for item extraction. Includes rate limiting, retry logic (429/529), input sanitization, prompt injection detection, and a regex fallback parser. |
 | `gst_rates.py` | 200+ hardcoded HSN/GST rate mappings. 5-step lookup: exact → substring → fuzzy (rapidfuzz) → JSON cache → Claude API fallback. |
 | `reports.py` | GST report generation: `get_gst_report()` (DB aggregation), `parse_report_range()` (NL date parsing), `msg_gst_report()` (WhatsApp format), `export_gst_report_pdf()` (ReportLab PDF). Indian number formatting. |
-| `config.py` | Loads `.env`, validates required keys, lazy Anthropic client singleton. Also holds Twilio config. |
-| `whatsapp_webhook.py` | Flask app with Twilio webhook. Full self-registration state machine (NEW → ASKED_NAME → ASKED_ADDRESS → ASKED_GSTIN → ACTIVE → EXPIRED). Bill preview/confirmation flow before PDF generation. Indian states dict for IGST state selection. REST API endpoints with API key auth. |
+| `config.py` | Loads `.env`, validates required keys, lazy Anthropic client singleton. Meta WhatsApp (`WHATSAPP_*`, `VERIFY_TOKEN`). |
+| `whatsapp_client.py` | Meta Graph API: send text, template, document by URL; parse webhook payload. |
+| `whatsapp_webhook.py` | Flask app with Meta webhook (GET verify + POST). Full self-registration state machine (NEW → ASKED_NAME → ASKED_ADDRESS → ASKED_GSTIN → ACTIVE → EXPIRED). Bill preview/confirmation flow before PDF generation. Indian states dict for IGST state selection. REST API endpoints with API key auth. |
 
 ---
 
 ## End-to-End Flow
 
 1. **Shopkeeper** sends WhatsApp message (e.g., "phone case 299 charger 499 customer Suresh")
-2. **Twilio** forwards to Flask `/webhook`
+2. **Meta** delivers inbound messages to Flask `/webhook`
 3. **State machine** checks registration state; if ACTIVE, proceeds to billing
 4. **Claude Parser** extracts customer name + items from natural language (English/Telugu/Hindi)
 5. **Preview** shown with parsed items, customer name, and tax type (CGST+SGST or IGST)
@@ -57,7 +58,7 @@ Two entry points:
 - **SQLAlchemy** — ORM (SQLite local, PostgreSQL production)
 - **ReportLab** — PDF generation
 - **Flask** — webhook server
-- **Twilio** — WhatsApp messaging
+- **Meta WhatsApp Cloud API** — WhatsApp messaging (Graph API)
 - **rapidfuzz** — fuzzy string matching for GST lookups
 - **gunicorn** — production WSGI server (4 workers)
 - **Deployed on Railway** (Procfile present)
@@ -82,7 +83,7 @@ Two entry points:
 | Service | Purpose |
 |---|---|
 | **Claude API** | NLP parsing of billing messages + GST rate lookup for unknown items |
-| **Twilio** | WhatsApp message send/receive |
+| **Meta WhatsApp Cloud API** | WhatsApp message send/receive |
 | **Railway** | Hosting (BASE_URL configured) |
 
 ---
