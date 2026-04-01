@@ -1678,9 +1678,12 @@ init_database()
 init_registration_tables()
 
 if __name__ == "__main__":
+    # ── LOCAL DEV ONLY ──
+    # In production, Gunicorn imports this module and uses `app` directly.
+    # This block only runs when you do: python whatsapp_webhook.py
 
     print("\n" + "="*55)
-    print("  BilledUp WhatsApp Webhook — Production")
+    print("  BilledUp WhatsApp Webhook — LOCAL DEV SERVER")
     print("  Bill smarter. Grow faster.")
     print("="*55)
     print(f"  Phone number ID: {os.getenv('WHATSAPP_PHONE_NUMBER_ID', '(set in .env)')}")
@@ -1701,7 +1704,10 @@ if __name__ == "__main__":
     print("     Callback URL: https://YOUR-PUBLIC-URL/webhook")
     print("     Verify token: VERIFY_TOKEN from .env")
     print("  3. Set BASE_URL to the same public origin (for PDF links)")
+    print("="*55)
+    print("\n  NOTE: For production, use Gunicorn via Procfile.")
+    print("  This Flask dev server is for local testing only.")
     print("="*55 + "\n")
 
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=True)

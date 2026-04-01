@@ -13,7 +13,15 @@ PLATFORM_TAGLINE  = os.getenv("PLATFORM_TAGLINE",  "Bill smarter. Grow faster.")
 PLATFORM_SUPPORT  = os.getenv("PLATFORM_SUPPORT_PHONE", "+91 99999 99999")
 
 # ── Database ──
-DATABASE_URL      = os.getenv("DATABASE_URL", "sqlite:///billedup.db")
+DATABASE_URL      = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError(
+        "\n"
+        "ERROR: DATABASE_URL is missing\n"
+        "Steps to fix:\n"
+        "  Local:      Add DATABASE_URL=sqlite:///billedup.db to your .env file\n"
+        "  Production: Set DATABASE_URL to your PostgreSQL connection string\n"
+    )
 
 # ── App ──
 DEBUG             = os.getenv("DEBUG", "False") == "True"
