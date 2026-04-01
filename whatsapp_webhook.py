@@ -1678,9 +1678,32 @@ init_database()
 init_registration_tables()
 
 if __name__ == "__main__":
+    # ── PRODUCTION AUTO-SWITCH ──
+    # If running on Railway (or any production env), exec into Gunicorn
+    # instead of using Flask's dev server. This handles the case where
+    # Railway runs "python whatsapp_webhook.py" instead of the Procfile.
+    _is_production = bool(
+        os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("RAILWAY_PROJECT_ID")
+    )
+
+    if _is_production:
+        _port = os.environ.get("PORT", "5000")
+        log.info(f"Production detected — switching to Gunicorn on port {_port}")
+        os.execvp("gunicorn", [
+            "gunicorn", "whatsapp_webhook:app",
+            "--bind", f"0.0.0.0:{_port}",
+            "--workers", "4",
+            "--threads", "2",
+            "--worker-class", "gthread",
+            "--timeout", "120",
+            "--max-requests", "1000",
+            "--max-requests-jitter", "100",
+            "--preload",
+        ])
+        # os.execvp replaces this process — nothing below runs
+
     # ── LOCAL DEV ONLY ──
-    # In production, Gunicorn imports this module and uses `app` directly.
-    # This block only runs when you do: python whatsapp_webhook.py
     from config import DEBUG as debug_mode
 
     print("\n" + "="*55)
@@ -1692,20 +1715,6 @@ if __name__ == "__main__":
     print(f"  Webhook URL    : http://localhost:5000/webhook")
     print(f"  Health check   : http://localhost:5000/health")
     print(f"  Admin panel    : http://localhost:5000/admin/registrations")
-    print("="*55)
-    print("\n  Shopkeeper self-registration flow:")
-    print("  1. Shopkeeper clicks button on website")
-    print("  2. WhatsApp opens — messages your Meta WhatsApp number")
-    print("  3. Bot asks shop name → address → GSTIN")
-    print("  4. 10 day trial activated automatically")
-    print("  5. Shopkeeper starts billing immediately")
-    print("="*55)
-    print("\n  Meta Cloud API:")
-    print("  1. Run ngrok (or Railway) exposing port 5000")
-    print("  2. Meta Developer → WhatsApp → Configuration:")
-    print("     Callback URL: https://YOUR-PUBLIC-URL/webhook")
-    print("     Verify token: VERIFY_TOKEN from .env")
-    print("  3. Set BASE_URL to the same public origin (for PDF links)")
     print("="*55)
     print("\n  NOTE: For production, use Gunicorn via Procfile.")
     print("  This Flask dev server is for local testing only.")
