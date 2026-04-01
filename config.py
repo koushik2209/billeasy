@@ -99,7 +99,7 @@ if __name__ == "__main__":
     print(f"  Debug    : {summary['debug']}")
     print(f"  Port     : {summary['port']}")
     print(f"  Bills in : {summary['bills_folder']}/")
-    print(f"  API Key  : {ANTHROPIC_API_KEY[:20]}...")
+    print(f"  API Key  : {ANTHROPIC_API_KEY[:8]}...{'*' * 12}")
     print("=" * 45)
     print("  Config loaded successfully")
     print("=" * 45)

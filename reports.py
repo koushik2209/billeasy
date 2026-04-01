@@ -64,13 +64,13 @@ def get_gst_report(shop_id: str, start_date: date, end_date: date) -> GSTReport:
             func.coalesce(func.sum(Bill.total_sgst), 0).label("total_sgst"),
             func.coalesce(func.sum(Bill.total_igst), 0).label("total_igst"),
             func.coalesce(func.sum(Bill.total_gst), 0).label("total_gst"),
-        ).filter(*base_filter, Bill.is_return == False).first()
+        ).filter(*base_filter, Bill.is_return.is_(False)).first()
 
         # Returns (credit notes)
         return_row = session.query(
             func.count(Bill.id).label("count"),
             func.coalesce(func.sum(Bill.grand_total), 0).label("total_returns"),
-        ).filter(*base_filter, Bill.is_return == True).first()
+        ).filter(*base_filter, Bill.is_return.is_(True)).first()
 
     total_invoices = (sales_row.count or 0) + (return_row.count or 0)
 

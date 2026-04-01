@@ -196,7 +196,7 @@ def activate_trial(phone: str, shop_name: str, address: str, gstin: str = ""):
         state        = "ACTIVE",
         trial_start  = trial_start.isoformat(),
         trial_end    = trial_end.isoformat(),
-        active       = 1,
+        active       = True,
     )
 
     log.info(f"Trial activated for {phone} — shop_id={shop_id} — {invoice_type} — ends {trial_end.date()}")
