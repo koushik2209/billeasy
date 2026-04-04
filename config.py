@@ -32,6 +32,7 @@ if _env.lower() == "production":
 else:
     DEBUG = os.getenv("DEBUG", "False") == "True"
 PORT              = int(os.getenv("PORT", 5000))
+DEV_MODE          = os.getenv("DEV_MODE", "False") == "True"
 
 # ── Bill settings ──
 BILL_PREFIX       = "INV"
@@ -62,6 +63,7 @@ def get_config_summary():
         "support": PLATFORM_SUPPORT,
         "database": DATABASE_URL,
         "debug": DEBUG,
+        "dev_mode": DEV_MODE,
         "port": PORT,
         "bill_prefix": BILL_PREFIX,
         "api_key_loaded": bool(ANTHROPIC_API_KEY),

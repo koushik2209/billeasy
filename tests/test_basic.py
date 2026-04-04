@@ -1655,3 +1655,96 @@ def test_webhook_payload_missing_message_id():
     msgs = parse_meta_webhook_payload(body)
     assert len(msgs) == 1
     assert msgs[0]["message_id"] == ""
+
+
+# ════════════════════════════════════════════════
+# SCHEMA VALIDATION TESTS
+# ════════════════════════════════════════════════
+
+class TestSchemaValidation:
+    """Tests for validate_schema(), reset_database(), and ensure_schema()."""
+
+    def test_validate_schema_passes_on_fresh_db(self):
+        """Fresh DB created by init_database() should pass validation."""
+        from database import init_database, validate_schema
+        init_database()
+        problems = validate_schema()
+        assert problems == []
+
+    def test_validate_schema_detects_missing_table(self):
+        """Dropping a required table should be detected."""
+        from database import engine, validate_schema
+        with engine.connect() as conn:
+            conn.execute(__import__("sqlalchemy").text("DROP TABLE IF EXISTS processed_messages"))
+            conn.commit()
+        problems = validate_schema()
+        assert any("processed_messages" in p for p in problems)
+        # Recreate for other tests
+        from database import init_database
+        init_database()
+
+    def test_validate_schema_detects_missing_column(self):
+        """A table missing a required column should be detected."""
+        from database import engine, validate_schema, init_database
+        # Recreate clean, then drop a column via raw SQL (SQLite workaround)
+        init_database()
+        # SQLite doesn't support DROP COLUMN before 3.35, so recreate table without the column
+        with engine.connect() as conn:
+            conn.execute(__import__("sqlalchemy").text("DROP TABLE IF EXISTS report_pdfs"))
+            conn.execute(__import__("sqlalchemy").text(
+                "CREATE TABLE report_pdfs (id INTEGER PRIMARY KEY, filename TEXT, shop_id TEXT)"
+            ))
+            conn.commit()
+        problems = validate_schema()
+        assert any("report_pdfs.pdf_data" in p for p in problems)
+        # Restore
+        with engine.connect() as conn:
+            conn.execute(__import__("sqlalchemy").text("DROP TABLE IF EXISTS report_pdfs"))
+            conn.commit()
+        init_database()
+
+    def test_reset_database_recreates_all_tables(self):
+        """reset_database() should produce a clean schema that passes validation."""
+        from database import reset_database, validate_schema
+        reset_database()
+        problems = validate_schema()
+        assert problems == []
+
+    def test_ensure_schema_noop_when_valid(self):
+        """ensure_schema should do nothing when schema is already valid."""
+        from database import init_database, ensure_schema, validate_schema
+        init_database()
+        ensure_schema(dev_mode=False)
+        problems = validate_schema()
+        assert problems == []
+
+    def test_ensure_schema_dev_mode_auto_resets(self):
+        """ensure_schema with dev_mode=True should auto-fix a broken schema."""
+        from database import engine, init_database, ensure_schema, validate_schema
+        init_database()
+        # Break schema
+        with engine.connect() as conn:
+            conn.execute(__import__("sqlalchemy").text("DROP TABLE IF EXISTS shop_item_master"))
+            conn.commit()
+        # Confirm broken
+        problems = validate_schema()
+        assert len(problems) > 0
+        # Auto-fix
+        ensure_schema(dev_mode=True)
+        problems = validate_schema()
+        assert problems == []
+
+    def test_ensure_schema_prod_mode_does_not_reset(self):
+        """ensure_schema with dev_mode=False should NOT auto-reset."""
+        from database import engine, init_database, ensure_schema, validate_schema
+        init_database()
+        # Break schema
+        with engine.connect() as conn:
+            conn.execute(__import__("sqlalchemy").text("DROP TABLE IF EXISTS shop_item_master"))
+            conn.commit()
+        # Should NOT fix
+        ensure_schema(dev_mode=False)
+        problems = validate_schema()
+        assert any("shop_item_master" in p for p in problems)
+        # Restore for other tests
+        init_database()

@@ -110,6 +110,7 @@ Two entry points:
 - **PDF safety**: All user-supplied text is XML-escaped before rendering in ReportLab Paragraphs
 - **API key logging**: Truncated to first 8 chars to prevent plaintext credential exposure
 - **Webhook dedup**: INSERT-FIRST pattern via `try_claim_message(message_id)` — attempts INSERT, returns True (new) or False (duplicate via UNIQUE constraint). No check-then-insert race condition. Empty/missing message_id skips dedup with a warning log. Cleanup throttled to every 100 webhook calls (not every request). Uses raw session to keep expected IntegrityError at DEBUG level. Fails open on non-integrity DB errors.
+- **Schema validation at startup**: `ensure_schema()` runs after `init_database()`. Checks required tables and columns against `_REQUIRED_SCHEMA` dict in `database.py` using SQLAlchemy `inspect`. If `DEV_MODE=True` → auto-resets DB (drops all, recreates from models). If `DEV_MODE=False` (production) → logs warnings only, no destructive action. `reset_database()` also deletes the SQLite file for a clean slate. All schema logs use `[DB]` prefix.
 
 ---
 

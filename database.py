@@ -201,7 +201,110 @@ def db_session():
 def init_database():
     """Create all tables."""
     Base.metadata.create_all(engine)
-    log.info(f"Database initialised: {DATABASE_URL.split('@')[-1] if '@' in DATABASE_URL else DATABASE_URL}")
+    log.info(f"[DB] Database initialised: {DATABASE_URL.split('@')[-1] if '@' in DATABASE_URL else DATABASE_URL}")
+
+
+# ════════════════════════════════════════════════
+# SCHEMA VALIDATION
+# ════════════════════════════════════════════════
+
+# Tables and columns that MUST exist for the app to function.
+# Add new entries here whenever a model gains a column or a new model is added.
+_REQUIRED_SCHEMA = {
+    "processed_messages": ["message_id"],
+    "report_pdfs":        ["filename", "shop_id", "pdf_data"],
+    "shop_item_master":   ["shop_id", "item_name", "hsn", "gst_rate", "confirmed", "use_count"],
+    "pending_bills":      ["phone", "data_json", "expires_at"],
+    "bills":              ["pdf_data", "is_return", "is_igst"],
+    "registrations":      ["invoice_type", "state_name", "state_code"],
+    "conversation_log":   ["phone", "direction", "message"],
+    "shops":              ["api_key", "state", "state_code", "upi"],
+}
+
+
+def validate_schema() -> list[str]:
+    """Check that all required tables and columns exist in the live database.
+
+    Returns a list of human-readable problem strings.
+    Empty list = schema is fine.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    problems: list[str] = []
+    try:
+        inspector = sa_inspect(engine)
+        existing_tables = set(inspector.get_table_names())
+
+        for table, required_cols in _REQUIRED_SCHEMA.items():
+            if table not in existing_tables:
+                problems.append(f"missing table: {table}")
+                continue
+            existing_cols = {c["name"] for c in inspector.get_columns(table)}
+            for col in required_cols:
+                if col not in existing_cols:
+                    problems.append(f"missing column: {table}.{col}")
+    except Exception as e:
+        problems.append(f"inspection error: {e}")
+
+    if problems:
+        for p in problems:
+            log.warning(f"[DB] Schema issue: {p}")
+    else:
+        log.info("[DB] Schema validation passed")
+
+    return problems
+
+
+def reset_database():
+    """Drop ALL tables and recreate from current models.
+
+    For SQLite: also deletes the DB file for a clean slate.
+    ONLY safe in dev — caller must gate on DEV_MODE.
+    """
+    log.warning("[DB] Resetting database — dropping all tables")
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+    # SQLite: delete the file itself for a truly clean start
+    if DATABASE_URL.startswith("sqlite"):
+        db_path = DATABASE_URL.replace("sqlite:///", "")
+        if db_path and os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+                log.info(f"[DB] Deleted SQLite file: {db_path}")
+            except OSError as e:
+                log.warning(f"[DB] Could not delete SQLite file: {e}")
+
+    Base.metadata.create_all(engine)
+    log.info("[DB] Database recreated from models")
+
+
+def ensure_schema(dev_mode: bool = False):
+    """Startup schema check. Call after init_database().
+
+    - If schema is valid → no-op.
+    - If dev_mode=True  → auto-reset and recreate.
+    - If dev_mode=False → log warnings only (production safe).
+    """
+    problems = validate_schema()
+    if not problems:
+        return
+
+    log.warning(f"[DB] {len(problems)} schema issue(s) detected")
+
+    if dev_mode:
+        log.warning("[DB] DEV_MODE=True — auto-resetting database")
+        reset_database()
+        post = validate_schema()
+        if post:
+            log.error(f"[DB] Schema STILL invalid after reset: {post}")
+        else:
+            log.info("[DB] Schema valid after reset")
+    else:
+        log.warning(
+            "[DB] DEV_MODE is off — NOT auto-resetting. "
+            "Fix manually or set DEV_MODE=True to auto-reset on next startup."
+        )
 
 
 # ════════════════════════════════════════════════

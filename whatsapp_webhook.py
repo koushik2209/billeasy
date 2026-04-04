@@ -54,6 +54,7 @@ from database import (
     init_database as init_db,
     generate_api_key, validate_api_key,
     try_claim_message, maybe_cleanup_processed_messages,
+    ensure_schema,
 )
 from reports import (
     get_gst_report, parse_report_range, msg_gst_report,
@@ -1978,6 +1979,10 @@ def api_today_summary():
 # Always init tables (works with both gunicorn and python direct)
 init_database()
 init_registration_tables()
+
+# Validate schema matches models — auto-reset in DEV_MODE, log-only in production
+from config import DEV_MODE
+ensure_schema(dev_mode=DEV_MODE)
 
 if not WHATSAPP_APP_SECRET:
     log.warning("WHATSAPP_APP_SECRET not set — webhook signature verification disabled")

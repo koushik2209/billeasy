@@ -8,6 +8,8 @@
 
 3. **DB-backed invoice sequences**: Invoice numbers use `InvoiceSequence` table with thread lock + `WITH FOR UPDATE` row lock. This replaced a JSON file approach to survive redeploys.
 
+   3b. **Startup schema validation**: `ensure_schema(dev_mode)` runs after `init_database()` at module-level startup. Uses SQLAlchemy `inspect` to verify required tables/columns exist (defined in `_REQUIRED_SCHEMA` dict). `DEV_MODE=True` → auto-reset (drop all + delete SQLite file + recreate). `DEV_MODE=False` → log warnings only. `reset_database()` available for manual use. Root cause: `create_all()` creates missing tables but does NOT add missing columns to existing tables. No Alembic — this is the MVP workaround.
+
 4. **SQLAlchemy dual-database**: SQLite locally, PostgreSQL in production. `DATABASE_URL` env var switches between them. Tests use a temp SQLite file (see `conftest.py`).
 
 5. **Lazy Anthropic client**: Singleton created on first use (`get_anthropic_client()`). WhatsApp sends go through `whatsapp_client.py` (Meta Graph API) using env `WHATSAPP_*`.
@@ -100,7 +102,7 @@
 
 - **Adding new GST items**: Add to the `GST_RATES` dict in `gst_rates.py`. Format: `"item_name": {"hsn": "XXXX", "gst": N}`. Items found by Claude are auto-cached in `gst_cache.json`.
 - **Changing Claude model**: Model is hardcoded as `claude-sonnet-4-20250514` in both `claude_parser.py` (line 400) and `gst_rates.py` (line 399). Change both.
-- **Database migrations**: No migration tool (Alembic) is configured. Schema changes require manual migration or table recreation.
+- **Database migrations**: No Alembic. Schema changes are caught at startup by `validate_schema()`. In dev (`DEV_MODE=True`), DB auto-resets. In prod, add columns manually or set `DEV_MODE=True` once (WARNING: drops all data). `_REQUIRED_SCHEMA` dict in `database.py` must be updated when adding new tables/columns.
 - **Invoice number format**: `{BILL_PREFIX}-{YEAR}-{SHOP_KEY}-{SEQUENCE:05d}`. Changing format requires updating `generate_invoice_number()` in `bill_generator.py`.
 - **Test strategy**: `conftest.py` sets up a temp SQLite DB and fake API key before any imports. Tests avoid live API calls. Run with `pytest`.
 - **Deployment**: Railway via Procfile — `gunicorn whatsapp_webhook:app` with 4 workers. Port from `$PORT` env var.
@@ -137,6 +139,8 @@
 11. **Fuzzy cache bounded**: `_fuzzy_cache` in `gst_rates.py` is capped at 10,000 entries to prevent unbounded memory growth.
 
 12. **No `logging.basicConfig` in modules**: Only `main.py` / `whatsapp_webhook.py` should call `basicConfig`. Module-level calls override the root logger level.
+
+13. **`create_all()` won't add columns**: SQLAlchemy's `Base.metadata.create_all()` only creates NEW tables. It does NOT alter existing tables to add missing columns. This is why `validate_schema()` + `reset_database()` exist — to detect and fix the mismatch.
 
 ---
 
