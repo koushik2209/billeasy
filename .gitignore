@@ -4,7 +4,6 @@ __pycache__/
 *.pyc
 bills/
 invoice_registry.json
-gst_cache.json
 
 # Python
 *.py[cod]

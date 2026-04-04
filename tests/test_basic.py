@@ -1544,9 +1544,8 @@ def test_dedup_cleanup_removes_old():
     """maybe_cleanup_processed_messages removes stale records when counter hits threshold."""
     from database import (
         db_session, ProcessedMessage, try_claim_message, init_database,
-        _DEDUP_CLEANUP_INTERVAL, _dedup_counter_lock,
     )
-    import database as db_mod
+    import db.dedup as dedup_mod
     from datetime import datetime, timedelta
     init_database()
 
@@ -1562,10 +1561,10 @@ def test_dedup_cleanup_removes_old():
     assert try_claim_message(old_id) is False  # can't claim → it exists
 
     # Force counter to threshold so next call triggers cleanup
-    with _dedup_counter_lock:
-        db_mod._dedup_call_counter = _DEDUP_CLEANUP_INTERVAL - 1
+    with dedup_mod._dedup_counter_lock:
+        dedup_mod._dedup_call_counter = dedup_mod._DEDUP_CLEANUP_INTERVAL - 1
 
-    db_mod.maybe_cleanup_processed_messages()
+    dedup_mod.maybe_cleanup_processed_messages()
 
     # Old record should be gone — claim succeeds again
     assert try_claim_message(old_id) is True
@@ -1573,20 +1572,17 @@ def test_dedup_cleanup_removes_old():
 
 def test_dedup_recent_survives_cleanup():
     """Recent records survive cleanup."""
-    from database import (
-        try_claim_message, init_database,
-        _DEDUP_CLEANUP_INTERVAL, _dedup_counter_lock,
-    )
-    import database as db_mod
+    from database import try_claim_message, init_database
+    import db.dedup as dedup_mod
     init_database()
 
     recent_id = "wamid_recent_survive_v2"
     assert try_claim_message(recent_id) is True
 
     # Force cleanup
-    with _dedup_counter_lock:
-        db_mod._dedup_call_counter = _DEDUP_CLEANUP_INTERVAL - 1
-    db_mod.maybe_cleanup_processed_messages()
+    with dedup_mod._dedup_counter_lock:
+        dedup_mod._dedup_call_counter = dedup_mod._DEDUP_CLEANUP_INTERVAL - 1
+    dedup_mod.maybe_cleanup_processed_messages()
 
     # Recent record still blocks re-claim
     assert try_claim_message(recent_id) is False
@@ -1594,24 +1590,23 @@ def test_dedup_recent_survives_cleanup():
 
 def test_dedup_cleanup_throttled():
     """Cleanup does NOT run on every call — only at threshold."""
-    from database import _DEDUP_CLEANUP_INTERVAL, _dedup_counter_lock
-    import database as db_mod
+    import db.dedup as dedup_mod
 
     # Reset counter
-    with _dedup_counter_lock:
-        db_mod._dedup_call_counter = 0
+    with dedup_mod._dedup_counter_lock:
+        dedup_mod._dedup_call_counter = 0
 
     # Call N-1 times — should not reset counter to 0
-    for _ in range(_DEDUP_CLEANUP_INTERVAL - 1):
-        db_mod.maybe_cleanup_processed_messages()
+    for _ in range(dedup_mod._DEDUP_CLEANUP_INTERVAL - 1):
+        dedup_mod.maybe_cleanup_processed_messages()
 
-    with _dedup_counter_lock:
-        assert db_mod._dedup_call_counter == _DEDUP_CLEANUP_INTERVAL - 1
+    with dedup_mod._dedup_counter_lock:
+        assert dedup_mod._dedup_call_counter == dedup_mod._DEDUP_CLEANUP_INTERVAL - 1
 
     # One more call triggers cleanup and resets counter
-    db_mod.maybe_cleanup_processed_messages()
-    with _dedup_counter_lock:
-        assert db_mod._dedup_call_counter == 0
+    dedup_mod.maybe_cleanup_processed_messages()
+    with dedup_mod._dedup_counter_lock:
+        assert dedup_mod._dedup_call_counter == 0
 
 
 def test_webhook_payload_includes_message_id():
